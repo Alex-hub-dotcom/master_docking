@@ -31,10 +31,15 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
-    # custom parameters/scales
-    # - controllable joint
-    cart_dof_name = "slider_to_cart"
-    pole_dof_name = "cart_to_pole"
+    # # custom parameters/scales
+    # # - controllable joint
+
+    dof_names = [
+        "teko_body_Revolucionar_8",
+        "teko_body_Revolucionar_9",
+        "teko_body_Revolucionar_10",
+        "teko_body_Revolucionar_11"
+    ]
     # - action scale
     action_scale = 100.0  # [N]
     # - reward scales

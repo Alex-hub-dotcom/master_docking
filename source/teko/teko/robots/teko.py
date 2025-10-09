@@ -9,7 +9,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 # Configuration
 ##
 
-TEKO_PATH = "teko/documents/teko_bot.usd"
+TEKO_PATH = "/workspace/teko/documents/teko_bot.usd"
 
 TEKO_CONFIGURATION = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
