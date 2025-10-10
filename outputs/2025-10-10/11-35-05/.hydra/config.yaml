@@ -1,0 +1,259 @@
+env:
+  viewer:
+    eye:
+    - 7.5
+    - 7.5
+    - 7.5
+    lookat:
+    - 0.0
+    - 0.0
+    - 0.0
+    cam_prim_path: /OmniverseKit_Persp
+    resolution:
+    - 1280
+    - 720
+    origin_type: world
+    env_index: 0
+    asset_name: null
+    body_name: null
+  sim:
+    physics_prim_path: /physicsScene
+    device: cuda:0
+    dt: 0.008333333333333333
+    render_interval: 2
+    gravity:
+    - 0.0
+    - 0.0
+    - -9.81
+    enable_scene_query_support: false
+    use_fabric: true
+    physx:
+      solver_type: 1
+      min_position_iteration_count: 1
+      max_position_iteration_count: 255
+      min_velocity_iteration_count: 0
+      max_velocity_iteration_count: 255
+      enable_ccd: false
+      enable_stabilization: false
+      enable_enhanced_determinism: false
+      bounce_threshold_velocity: 0.5
+      friction_offset_threshold: 0.04
+      friction_correlation_distance: 0.025
+      gpu_max_rigid_contact_count: 8388608
+      gpu_max_rigid_patch_count: 163840
+      gpu_found_lost_pairs_capacity: 2097152
+      gpu_found_lost_aggregate_pairs_capacity: 33554432
+      gpu_total_aggregate_pairs_capacity: 2097152
+      gpu_collision_stack_size: 67108864
+      gpu_heap_capacity: 67108864
+      gpu_temp_buffer_capacity: 16777216
+      gpu_max_num_partitions: 8
+      gpu_max_soft_body_contacts: 1048576
+      gpu_max_particle_contacts: 1048576
+    physics_material:
+      func: isaaclab.sim.spawners.materials.physics_materials:spawn_rigid_body_material
+      static_friction: 0.5
+      dynamic_friction: 0.5
+      restitution: 0.0
+      friction_combine_mode: average
+      restitution_combine_mode: average
+      compliant_contact_stiffness: 0.0
+      compliant_contact_damping: 0.0
+    render:
+      enable_translucency: null
+      enable_reflections: null
+      enable_global_illumination: null
+      antialiasing_mode: null
+      enable_dlssg: null
+      enable_dl_denoiser: null
+      dlss_mode: null
+      enable_direct_lighting: null
+      samples_per_pixel: null
+      enable_shadows: null
+      enable_ambient_occlusion: null
+      carb_settings: null
+      rendering_mode: null
+    create_stage_in_memory: false
+  ui_window_class_type: isaaclab.envs.ui.base_env_window:BaseEnvWindow
+  seed: null
+  decimation: 2
+  is_finite_horizon: false
+  episode_length_s: 5.0
+  scene:
+    num_envs: 32
+    env_spacing: 3.0
+    lazy_sensor_update: true
+    replicate_physics: true
+    filter_collisions: true
+    clone_in_fabric: false
+  events: null
+  observation_space: '{"type": "python", "space": "Box", "value": 3}'
+  num_observations: null
+  state_space: '{"type": "python", "space": "Box", "value": 0}'
+  num_states: null
+  observation_noise_model: null
+  action_space: '{"type": "python", "space": "Box", "value": 2}'
+  num_actions: null
+  action_noise_model: null
+  rerender_on_reset: false
+  wait_for_textures: true
+  xr: null
+  log_dir: null
+  robot_cfg:
+    class_type: isaaclab.assets.articulation.articulation:Articulation
+    prim_path: /World/envs/env_.*/Robot
+    spawn:
+      func: isaaclab.sim.spawners.from_files.from_files:spawn_from_usd
+      visible: true
+      semantic_tags: null
+      copy_from_source: true
+      mass_props: null
+      deformable_props: null
+      rigid_props: null
+      collision_props: null
+      activate_contact_sensors: false
+      scale: null
+      articulation_props:
+        articulation_enabled: null
+        enabled_self_collisions: false
+        solver_position_iteration_count: null
+        solver_velocity_iteration_count: null
+        sleep_threshold: null
+        stabilization_threshold: null
+        fix_root_link: null
+      fixed_tendons_props: null
+      spatial_tendons_props: null
+      joint_drive_props: null
+      visual_material_path: material
+      visual_material: null
+      usd_path: /workspace/teko/documents/teko_bot.usd
+      variants: null
+    init_state:
+      pos:
+      - 0.0
+      - 0.0
+      - 0.0
+      rot:
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      lin_vel:
+      - 0.0
+      - 0.0
+      - 0.0
+      ang_vel:
+      - 0.0
+      - 0.0
+      - 0.0
+      joint_pos:
+        teko_body_Revolucionar_10: 0.0
+        teko_body_Revolucionar_11: 0.0
+        teko_body_Revolucionar_8: 0.0
+        teko_body_Revolucionar_9: 0.0
+        teko_connect_male_Deslizador_19: 0.0
+      joint_vel:
+        .*: 0.0
+    collision_group: 0
+    debug_vis: false
+    articulation_root_prim_path: null
+    soft_joint_pos_limit_factor: 1.0
+    actuators:
+      wheel_acts:
+        class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+        joint_names_expr:
+        - teko_body_.*
+        effort_limit: null
+        velocity_limit: null
+        effort_limit_sim: 1000.0
+        velocity_limit_sim: null
+        stiffness: 0.0
+        damping: 100000.0
+        armature: null
+        friction: null
+        dynamic_friction: null
+        viscous_friction: null
+    actuator_value_resolution_debug_print: false
+  dof_names:
+  - teko_body_Revolucionar_8
+  - teko_body_Revolucionar_9
+  - teko_body_Revolucionar_10
+  - teko_body_Revolucionar_11
+  action_scale: 8.0
+  rew_scale_alive: 1.0
+  rew_scale_terminated: -2.0
+  rew_scale_pole_pos: -1.0
+  rew_scale_cart_vel: -0.01
+  rew_scale_pole_vel: -0.005
+  initial_pole_angle_range:
+  - -0.25
+  - 0.25
+  max_cart_pos: 3.0
+agent:
+  seed: 42
+  models:
+    separate: false
+    policy:
+      class: GaussianMixin
+      clip_actions: false
+      clip_log_std: true
+      min_log_std: -20.0
+      max_log_std: 2.0
+      initial_log_std: 0.0
+      network:
+      - name: net
+        input: STATES
+        layers:
+        - 32
+        - 32
+        activations: elu
+      output: ACTIONS
+    value:
+      class: DeterministicMixin
+      clip_actions: false
+      network:
+      - name: net
+        input: STATES
+        layers:
+        - 32
+        - 32
+        activations: elu
+      output: ONE
+  memory:
+    class: RandomMemory
+    memory_size: -1
+  agent:
+    class: PPO
+    rollouts: 32
+    learning_epochs: 8
+    mini_batches: 8
+    discount_factor: 0.99
+    lambda: 0.95
+    learning_rate: 0.0005
+    learning_rate_scheduler: KLAdaptiveLR
+    learning_rate_scheduler_kwargs:
+      kl_threshold: 0.008
+    state_preprocessor: RunningStandardScaler
+    state_preprocessor_kwargs: null
+    value_preprocessor: RunningStandardScaler
+    value_preprocessor_kwargs: null
+    random_timesteps: 0
+    learning_starts: 0
+    grad_norm_clip: 1.0
+    ratio_clip: 0.2
+    value_clip: 0.2
+    clip_predicted_values: true
+    entropy_loss_scale: 0.0
+    value_loss_scale: 2.0
+    kl_threshold: 0.0
+    rewards_shaper_scale: 0.1
+    time_limit_bootstrap: false
+    experiment:
+      directory: cartpole_direct
+      experiment_name: ''
+      write_interval: auto
+      checkpoint_interval: auto
+  trainer:
+    class: SequentialTrainer
+    timesteps: 4800
+    environment_info: log
