@@ -59,9 +59,9 @@ if __name__ == "__main__":
     p.add_argument("--num-envs", type=int, default=16)
     p.add_argument("--env-spacing", type=float, default=4.0)
     p.add_argument("--episode-len", type=float, default=5.0)
-    p.add_argument("--scale", type=float, default=18.0)
+    p.add_argument("--scale", type=float, default=10.0)      # safer default
     p.add_argument("--seconds", type=float, default=8.0)
-    p.add_argument("--spawn-height", type=float, default=0.03)
+    p.add_argument("--spawn-height", type=float, default=0.05)
     # tracks (default)
     p.add_argument("--left", type=float, default=0.6)
     p.add_argument("--right", type=float, default=0.6)

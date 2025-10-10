@@ -1,6 +1,8 @@
 # Copyright (c) 2022-2025
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -19,7 +21,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     episode_length_s = 5.0
 
     # Spaces
-    action_space = 2                  # set to 4 if independent_wheels = True
+    action_space = 2                  # set to 4 if independent_wheels=True
     observation_space = 3             # [dot, cross_z, forward_speed]
     state_space = 0
 
@@ -38,25 +40,29 @@ class TekoEnvCfg(DirectRLEnvCfg):
         replicate_physics=True,
     )
 
-    # NEW joint names in order [FL, FR, RL, RR]
+    # Joint names in order [FL, FR, RL, RR]
     dof_names = [
         "teko_body_Revolucionar_31",  # FL
         "teko_body_Revolucionar_32",  # FR
-        "teko_body_Revolucionar_33",  # RL   <- was 34
-        "teko_body_Revolucionar_34",  # RR   <- was 33
+        "teko_body_Revolucionar_33",  # RL
+        "teko_body_Revolucionar_34",  # RR
     ]
 
     # Control
     independent_wheels = False
-    action_scale = 18.0
-    wheel_polarity = -1.0  # flip all if +left/+right moved backward before
+    action_scale = 10.0              # start modest; adjust with --scale
+    wheel_polarity = -1.0            # keep if +left/+right previously went backward
 
-    # Drive (velocity-like behavior uses damping as gain)
-    drive_damping = 30.0
-    drive_max_force = 400.0
+    # Drive (if runtime API exists; else actuators cfg handles it)
+    drive_damping = 40.0
+    drive_max_force = 120.0
 
-    # Spawn height offset above ground to avoid initial penetration
-    spawn_height = 0.05  # try 0.03–0.08 depending on your USD
+    # Spawn height (meters) to avoid initial penetration
+    spawn_height = 0.05
+
+    # Target smoothing / safety
+    max_wheel_speed = 12.0           # rad/s clamp
+    max_wheel_accel = 30.0           # rad/s^2 slew limit
 
     # Legacy placeholders (unused)
     rew_scale_alive = 1.0
