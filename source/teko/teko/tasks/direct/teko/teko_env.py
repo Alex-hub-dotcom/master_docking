@@ -123,13 +123,8 @@ class TekoEnv(DirectRLEnv):
         return v / norm
 
     def _update_command_yaws(self):
-        ratio = self.commands[:, 1] / (self.commands[:, 0] + 1e-8)
-        gzero = self.commands > 0
-        lzero = self.commands < 0
-        plus = (lzero[:, 0] & gzero[:, 1])
-        minus = (lzero[:, 0] & lzero[:, 1])
-        offsets = torch.pi * plus - torch.pi * minus
-        self.yaws = torch.atan(ratio).reshape(-1, 1) + offsets.reshape(-1, 1)
+        # yaw da direção de comando no plano XY: atan2(y, x) (robusto em todos os quadrantes)
+        self.yaws = torch.atan2(self.commands[:, 1], self.commands[:, 0]).reshape(-1, 1)
 
     def _build_wheel_signs(self):
         """Enforce same sign per side: FL==RL and FR==RR."""
@@ -155,6 +150,16 @@ class TekoEnv(DirectRLEnv):
         # Name → index
         joint_names = list(self.robot.joint_names)
         name_to_idx = {n: i for i, n in enumerate(joint_names)}
+
+        # Mapeamento defensivo: acusa exatamente quais nomes estão em falta
+        missing = [n for n in self.cfg.dof_names if n not in name_to_idx]
+        if missing:
+            raise RuntimeError(
+                "Joint name(s) not found in TEKO asset.\n"
+                f"Missing: {missing}\n"
+                f"Available joints: {joint_names}"
+            )
+
         dof_idx_list = [name_to_idx[n] for n in self.cfg.dof_names]
         self.dof_idx = torch.tensor(dof_idx_list, dtype=torch.long, device=self.device)
 
@@ -224,7 +229,7 @@ class TekoEnv(DirectRLEnv):
             pol = float(self.cfg.wheel_polarity)
             left = (scale * self.actions[:, 0]).unsqueeze(-1)   # (N,1)
             right = (scale * self.actions[:, 1]).unsqueeze(-1)  # (N,1)
-            # DOF order is [FL, FR, RL, RR]; feed [R, L, R, L] to fix swapped tracks
+            # DOF order é [FL, FR, RL, RR]; usar [R, L, R, L] se as faixas estiverem invertidas
             raw = torch.hstack([right, left, right, left])      # (N,4)
             targets = raw * self.wheel_signs.unsqueeze(0) * pol
 
