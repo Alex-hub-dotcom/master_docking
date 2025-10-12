@@ -1,3 +1,4 @@
+# /workspace/teko/source/teko/teko/tasks/direct/teko/teko_env.py
 # Copyright (c) 2022-2025
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,11 +13,20 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
+# USD stage access
+from omni.usd import get_context
+from pxr import Sdf
+
 from .teko_env_cfg import TekoEnvCfg
+
+# Arena parameters (per environment)
+ARENA_SIDE = 8.0   # meters
+WALL_THK   = 0.05  # meters
+WALL_HGT   = 1.2   # meters
 
 
 class TekoEnv(DirectRLEnv):
-    """Tiny direct RL env for a 4-wheel TEKO robot (just ground + robot)."""
+    """Tiny direct RL env for a 4-wheel TEKO robot (ground + robot + 8x8 m arena)."""
 
     cfg: TekoEnvCfg
 
@@ -38,9 +48,30 @@ class TekoEnv(DirectRLEnv):
         self._max_wheel_accel = float(self.cfg.max_wheel_accel)
         self._env_dt = float(self.cfg.decimation) * float(self.cfg.sim.dt)
 
-        # Will be set once PhysX views exist
+        # Will be resolved once PhysX views exist
         self.dof_idx: torch.Tensor | None = None
         self.wheel_signs: torch.Tensor | None = None  # (4,)
+
+    # ----------------------- USD helpers -----------------------
+
+    def _stage(self):
+        return get_context().get_stage()
+
+    def _prim_exists(self, path: str) -> bool:
+        return self._stage().GetPrimAtPath(path).IsValid()
+
+    def _remove_prim_if_exists(self, path: str):
+        st = self._stage()
+        if st.GetPrimAtPath(path).IsValid():
+            st.RemovePrim(Sdf.Path(path))
+
+    def _spawn_cuboid_unique(self, prim_path, cfg, translation, orientation):
+        """Spawn a cuboid only if the prim doesn't already exist."""
+        if self._prim_exists(prim_path):
+            return
+        sim_utils.spawn_cuboid(
+            prim_path=prim_path, cfg=cfg, translation=translation, orientation=orientation
+        )
 
     # ----------------------- scene setup -----------------------
 
@@ -64,6 +95,65 @@ class TekoEnv(DirectRLEnv):
         self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.robot
 
+        # Build an 8x8 m arena (four kinematic walls) around each env origin (in local coords)
+        for i in range(self.cfg.scene.num_envs):
+            self._spawn_arena_root(i)
+            self._spawn_arena_walls(i)
+
+    # ----------------------- arena builder -----------------------
+
+    def _spawn_arena_root(self, env_index: int):
+        """Ensure a clean '/arena' Xform exists under each env."""
+        base = f"/World/envs/env_{env_index}/arena"
+        stage = self._stage()
+        # remove any existing arena subtree to avoid duplicate-prim errors
+        if stage.GetPrimAtPath(base).IsValid():
+            stage.RemovePrim(Sdf.Path(base))
+        # define a fresh Xform prim
+        stage.DefinePrim(Sdf.Path(base), "Xform")
+
+    def _spawn_arena_walls(self, env_index: int):
+        """Create 4 kinematic walls forming an 8x8 m box centered at env origin."""
+        half = ARENA_SIDE * 0.5
+        zc = WALL_HGT * 0.5
+        base = f"/World/envs/env_{env_index}/arena"
+
+        wall_mat = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.28, 0.28, 0.28),
+            roughness=1.0,
+            metallic=0.0,
+            opacity=1.0,
+        )
+
+        # N/S walls (long along X, thin along Y)
+        wall_NS = sim_utils.CuboidCfg(
+            size=(ARENA_SIDE, WALL_THK, WALL_HGT),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=wall_mat,
+        )
+        # E/W walls (long along Y, thin along X)
+        wall_EW = sim_utils.CuboidCfg(
+            size=(WALL_THK, ARENA_SIDE, WALL_HGT),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=wall_mat,
+        )
+
+        # All translations are RELATIVE to env_i frame (0,0,0 = env center)
+        self._spawn_cuboid_unique(
+            f"{base}/wall_n", wall_NS, translation=(0.0, +half, zc), orientation=(0, 0, 0, 1)
+        )
+        self._spawn_cuboid_unique(
+            f"{base}/wall_s", wall_NS, translation=(0.0, -half, zc), orientation=(0, 0, 0, 1)
+        )
+        self._spawn_cuboid_unique(
+            f"{base}/wall_e", wall_EW, translation=(+half, 0.0, zc), orientation=(0, 0, 0, 1)
+        )
+        self._spawn_cuboid_unique(
+            f"{base}/wall_w", wall_EW, translation=(-half, 0.0, zc), orientation=(0, 0, 0, 1)
+        )
+
     # ----------------------- internals -----------------------
 
     def _lazy_init_articulation(self):
@@ -72,7 +162,7 @@ class TekoEnv(DirectRLEnv):
         if getattr(self.robot, "root_physx_view", None) is None:
             return
 
-        # Map joint names -> indices
+        # Joint names -> indices
         joint_names = list(self.robot.joint_names)
         name_to_idx = {n: i for i, n in enumerate(joint_names)}
         missing = [n for n in self.cfg.dof_names if n not in name_to_idx]
@@ -82,11 +172,10 @@ class TekoEnv(DirectRLEnv):
                 f"Missing: {missing}\n"
                 f"Available joints: {joint_names}"
             )
-
         dof_idx_list = [name_to_idx[n] for n in self.cfg.dof_names]
         self.dof_idx = torch.tensor(dof_idx_list, dtype=torch.long, device=self.device)
 
-        # Fixed: identical spin sign for all wheels (L=R -> straight)
+        # Force identical spin sign for all wheels to avoid unintended yaw when L=R
         self.wheel_signs = torch.ones(4, device=self.device, dtype=torch.float32)
 
         # Velocity-like drive: stiffness=0, damping>0
@@ -114,15 +203,13 @@ class TekoEnv(DirectRLEnv):
 
         pol = float(self.cfg.wheel_polarity)
         if self.cfg.independent_wheels:
-            # actions: [FL, FR, RL, RR]
-            raw = float(self.cfg.action_scale) * self.actions
+            raw = float(self.cfg.action_scale) * self.actions  # [FL, FR, RL, RR]
             targets = raw * self.wheel_signs.unsqueeze(0) * pol
         else:
-            # actions: [left, right] -> [FL, FR, RL, RR]
             scale = float(self.cfg.action_scale)
             left = (scale * self.actions[:, 0]).unsqueeze(-1)
             right = (scale * self.actions[:, 1]).unsqueeze(-1)
-            raw = torch.hstack([left, right, left, right])
+            raw = torch.hstack([left, right, left, right])  # [FL, FR, RL, RR]
             targets = raw * self.wheel_signs.unsqueeze(0) * pol
 
         # Slew-rate limit + clamp
@@ -164,6 +251,3 @@ class TekoEnv(DirectRLEnv):
                                         device=self.device).repeat(len(env_ids), 1)
             root[:, 7:13] = 0.0
             self.robot.write_root_state_to_sim(root, env_ids)
-
-
-#python ./scripts/skrl/train.py --task=Template-Teko-Direct-v0

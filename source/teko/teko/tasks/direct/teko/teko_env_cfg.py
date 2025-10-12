@@ -1,3 +1,4 @@
+# /workspace/teko/source/teko/teko/tasks/direct/teko/teko_env_cfg.py
 # Copyright (c) 2022-2025
 # SPDX-License-Identifier: BSD-3-Clause
 
@@ -18,7 +19,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # Timing
     decimation = 2
-    episode_length_s = 5.0
+    # Long episode so demos don't auto-reset mid-run
+    episode_length_s = 300.0
 
     # Spaces
     action_space = 2               # [left, right]
@@ -36,10 +38,10 @@ class TekoEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot"
     )
 
-    # Scene (demo may sobrescrever para 1 env)
+    # Scene: 8 envs with enough spacing for 8x8 m arenas + margin
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=16,
-        env_spacing=10.0,
+        num_envs=8,
+        env_spacing=12.0,   # increase to 14.0 if you ever see overlap
         replicate_physics=True,
     )
 
@@ -52,17 +54,18 @@ class TekoEnvCfg(DirectRLEnvCfg):
     ]
 
     # Control
-   # Control
+    independent_wheels = False
     action_scale = 8.0
-    wheel_polarity = -1.0     # mantenha se “frente” já está correta
+    wheel_polarity = -1.0   # flip to +1.0 if forward is inverted for your USD
 
-    # Drive
-    drive_damping = 40.0
-    drive_max_force = 30.0    # mais força nas rodas
+    # Drive (velocity-like via damping)
+    drive_damping = 35.0
+    drive_max_force = 25.0
 
-    # Safety / limits
-    max_wheel_speed = 10.0    # rad/s
-    max_wheel_accel = 25.0    # rad/s^2
+    # Spawn / safety
+    spawn_height = 0.06
+    max_wheel_speed = 12.0
+    max_wheel_accel = 60.0
 
-    # (opcional) ajuda a sair da inércia se sentir “travado”
-    ff_torque = 6.0
+    # Feed-forward torque
+    ff_torque = 8.0
