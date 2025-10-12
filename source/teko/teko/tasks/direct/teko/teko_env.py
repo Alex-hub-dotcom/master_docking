@@ -33,9 +33,6 @@ class TekoEnv(DirectRLEnv):
 
     cfg: TekoEnvCfg
 
-    # --------------------------------------------------------------------------
-    # init
-    # --------------------------------------------------------------------------
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -54,9 +51,7 @@ class TekoEnv(DirectRLEnv):
         self.dof_idx: torch.Tensor | None = None
         self.wheel_signs: torch.Tensor | None = None
 
-    # --------------------------------------------------------------------------
     # USD helpers
-    # --------------------------------------------------------------------------
     def _stage(self):
         return get_context().get_stage()
 
@@ -78,9 +73,7 @@ class TekoEnv(DirectRLEnv):
             orientation=orientation,
         )
 
-    # --------------------------------------------------------------------------
     # scene building
-    # --------------------------------------------------------------------------
     def _setup_scene(self):
         # 1) robot
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -103,7 +96,7 @@ class TekoEnv(DirectRLEnv):
         for i in range(self.cfg.scene.num_envs):
             self._spawn_arena_root(i)
             self._spawn_arena_walls(i)
-            self._spawn_visual_floor_for_env(i)  # << one brown floor per env
+            self._spawn_visual_floor_for_env(i)  # one brown floor per env
             self._make_rpi_v2_camera(
                 env_index=i,
                 xform_name="teko_camera",
@@ -111,7 +104,7 @@ class TekoEnv(DirectRLEnv):
                 resolution=(1280, 960),
             )
 
-    # --- arena root
+    # arena root
     def _spawn_arena_root(self, env_index: int):
         base = f"/World/envs/env_{env_index}/arena"
         stage = self._stage()
@@ -119,7 +112,7 @@ class TekoEnv(DirectRLEnv):
             stage.RemovePrim(Sdf.Path(base))
         stage.DefinePrim(Sdf.Path(base), "Xform")
 
-    # --- arena walls (visual, kinematic)
+    # arena walls (visual, kinematic)
     def _spawn_arena_walls(self, env_index: int):
         half = ARENA_SIDE * 0.5
         zc = WALL_HGT * 0.5
@@ -149,7 +142,7 @@ class TekoEnv(DirectRLEnv):
         self._spawn_cuboid_unique(f"{base}/wall_e", wall_EW, (+half, 0.0, zc), (0, 0, 0, 1))
         self._spawn_cuboid_unique(f"{base}/wall_w", wall_EW, (-half, 0.0, zc), (0, 0, 0, 1))
 
-    # --- per-env visual floor (brown, no collision)
+    # per-env visual floor (brown, no collision)
     def _spawn_visual_floor_for_env(self, env_index: int):
         base = f"/World/envs/env_{env_index}"
         floor_path = f"{base}/visual_floor"
@@ -171,7 +164,7 @@ class TekoEnv(DirectRLEnv):
             collision_props=None,      # no collisions
         )
 
-        # Put it slightly above z=0 to avoid z-fighting with the physical ground.
+        # Place slightly above z=0 to avoid z-fighting with the physical ground.
         sim_utils.spawn_cuboid(
             prim_path=floor_path,
             cfg=plate_cfg,
@@ -179,12 +172,10 @@ class TekoEnv(DirectRLEnv):
             orientation=(0, 0, 0, 1),
         )
 
-    # --------------------------------------------------------------------------
     # camera injection (rear view, 180° yaw, slight -X offset)
-    # --------------------------------------------------------------------------
     def _set_resolution_meta_int2(self, prim, res_xy: tuple[int, int]):
         """
-        Ensure prim has 'user:resolution' as Int2. If an attribute with other type
+        Ensure prim has 'user:resolution' as Int2. If an attribute with another type
         exists (e.g., Vec2d), remove and recreate as Int2.
         """
         name = "user:resolution"
@@ -229,18 +220,17 @@ class TekoEnv(DirectRLEnv):
         cam = UsdGeom.Camera(cam_prim)
 
         # 4) transform: USD cameras look along -Z. We want rear view (-X of robot),
-        # so set yaw=180° to turn -Z -> +Z, then use the mounting Xform to align as expected.
-        # Easiest and most compatible: use XformCommonAPI (no RemoveXformOp needed).
+        # so set yaw=180° to turn -Z -> +Z, then rely on the mounting Xform for alignment.
+        # Use XformCommonAPI for broad compatibility.
         xapi = UsdGeom.XformCommonAPI(cam_prim)
         xapi.SetRotate(Gf.Vec3f(0.0, 180.0, 0.0), UsdGeom.XformCommonAPI.RotationOrderXYZ)  # yaw 180°
-        xapi.SetTranslate(Gf.Vec3d(-0.06, 0.0, 0.0))  # 6 cm para fora
+        xapi.SetTranslate(Gf.Vec3d(-0.06, 0.0, 0.0))  # 6 cm outward along -X
 
-
-        # 5) intrinsics (IMX219-ish)
+        # 5) intrinsics (IMX219-like)
         cam.GetFocalLengthAttr().Set(3.04)
         cam.GetHorizontalApertureAttr().Set(3.68)
         cam.GetVerticalApertureAttr().Set(2.76)
-        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))  # near=5 cm
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))  # near = 5 cm
         cam.GetFocusDistanceAttr().Set(1.0)
         cam.GetFStopAttr().Set(2.0)
 
@@ -252,9 +242,7 @@ class TekoEnv(DirectRLEnv):
             f"primType={cam_prim.GetTypeName()}  rot=(0,180,0)  off=(-0.06,0,0)"
         )
 
-    # --------------------------------------------------------------------------
     # RL plumbing (minimal)
-    # --------------------------------------------------------------------------
     def _lazy_init_articulation(self):
         if self.dof_idx is not None and self.wheel_signs is not None:
             return
@@ -329,7 +317,7 @@ class TekoEnv(DirectRLEnv):
 
         self._lazy_init_articulation()
         if getattr(self.robot, "root_physx_view", None) is not None:
-            # place robot above per-env origin
+            # place robot above the per-env origin
             root = self.robot.data.default_root_state[env_ids]
             root[:, :3] = self.scene.env_origins[env_ids]
             root[:, 2] += float(self.cfg.spawn_height)
@@ -339,12 +327,10 @@ class TekoEnv(DirectRLEnv):
             self.robot.write_root_state_to_sim(root, env_ids)
 
 
-# --------------------------------------------------------------------------
-# Optional local smoke test (you can keep; it's handy to sanity check)
-# --------------------------------------------------------------------------
+# Optional local smoke test (handy to sanity check)
 if __name__ == "__main__":
     cfg = TekoEnvCfg()
-    env = TekoEnv(cfg, render_mode="window")  # use "headless" if you don't want a window
+    env = TekoEnv(cfg, render_mode="window")  # use "headless" to run without a window
     env.reset()
     print("Env OK. Closing.")
     env.close()
