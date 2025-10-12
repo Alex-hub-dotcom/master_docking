@@ -10,7 +10,7 @@ def main(headless=False):
     from teko.tasks.direct.teko.teko_env import TekoEnv
     from teko.tasks.direct.teko.teko_env_cfg import TekoEnvCfg
 
-    cfg = TekoEnvCfg()  # uses num_envs=8 from cfg
+    cfg = TekoEnvCfg()  
     env = TekoEnv(cfg)
     env.reset()
 

@@ -15,31 +15,48 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from omni.usd import get_context
 from pxr import Sdf, Usd, UsdGeom, Gf
 
+# Project cfg
 from .teko_env_cfg import TekoEnvCfg
 
-ARENA_SIDE = 8.0
+
+# ----- arena constants (visual walls only) -----
+ARENA_SIDE = 8.0       # 8x8 m square
 WALL_THK   = 0.05
 WALL_HGT   = 1.2
 
+
 class TekoEnv(DirectRLEnv):
-    """Ground + robot + 8x8 arena + (USD) camera marker."""
+    """
+    Simple world: robot + per-env arena (walls) + per-env brown visual floor.
+    Also injects a USD Camera under the robot's "teko_camera" Xform, rotated 180° (rear view).
+    """
 
     cfg: TekoEnvCfg
 
+    # --------------------------------------------------------------------------
+    # init
+    # --------------------------------------------------------------------------
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+
         device = self.device
         nenv = self.cfg.scene.num_envs
         a_dim = 4 if self.cfg.independent_wheels else 2
+
+        # action / control bookkeeping
         self.actions = torch.zeros((nenv, a_dim), device=device)
         self._targets_prev = torch.zeros((nenv, 4), device=device)
         self._max_wheel_speed = float(self.cfg.max_wheel_speed)
         self._max_wheel_accel = float(self.cfg.max_wheel_accel)
         self._env_dt = float(self.cfg.decimation) * float(self.cfg.sim.dt)
+
+        # articulation handles
         self.dof_idx: torch.Tensor | None = None
         self.wheel_signs: torch.Tensor | None = None
 
-    # ---------- USD helpers
+    # --------------------------------------------------------------------------
+    # USD helpers
+    # --------------------------------------------------------------------------
     def _stage(self):
         return get_context().get_stage()
 
@@ -54,13 +71,21 @@ class TekoEnv(DirectRLEnv):
     def _spawn_cuboid_unique(self, prim_path, cfg, translation, orientation):
         if self._prim_exists(prim_path):
             return
-        sim_utils.spawn_cuboid(prim_path=prim_path, cfg=cfg,
-                               translation=translation, orientation=orientation)
+        sim_utils.spawn_cuboid(
+            prim_path=prim_path,
+            cfg=cfg,
+            translation=translation,
+            orientation=orientation,
+        )
 
-    # ---------- scene
+    # --------------------------------------------------------------------------
+    # scene building
+    # --------------------------------------------------------------------------
     def _setup_scene(self):
+        # 1) robot
         self.robot = Articulation(self.cfg.robot_cfg)
 
+        # 2) physical ground (flat infinite, with friction)
         spawn_ground_plane(
             prim_path="/World/ground",
             cfg=GroundPlaneCfg(
@@ -70,16 +95,23 @@ class TekoEnv(DirectRLEnv):
             ),
         )
 
+        # 3) register and clone envs
         self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.robot
 
+        # 4) per-env content
         for i in range(self.cfg.scene.num_envs):
             self._spawn_arena_root(i)
             self._spawn_arena_walls(i)
+            self._spawn_visual_floor_for_env(i)  # << one brown floor per env
             self._make_rpi_v2_camera(
-                env_index=i, xform_name="teko_camera", cam_name="cam_rpi_v2", resolution=(1280, 960)
+                env_index=i,
+                xform_name="teko_camera",
+                cam_name="cam_rpi_v2",
+                resolution=(1280, 960),
             )
 
+    # --- arena root
     def _spawn_arena_root(self, env_index: int):
         base = f"/World/envs/env_{env_index}/arena"
         stage = self._stage()
@@ -87,13 +119,17 @@ class TekoEnv(DirectRLEnv):
             stage.RemovePrim(Sdf.Path(base))
         stage.DefinePrim(Sdf.Path(base), "Xform")
 
+    # --- arena walls (visual, kinematic)
     def _spawn_arena_walls(self, env_index: int):
         half = ARENA_SIDE * 0.5
         zc = WALL_HGT * 0.5
         base = f"/World/envs/env_{env_index}/arena"
 
         wall_mat = sim_utils.PreviewSurfaceCfg(
-            diffuse_color=(0.28, 0.28, 0.28), roughness=1.0, metallic=0.0, opacity=1.0
+            diffuse_color=(0.28, 0.28, 0.28),
+            roughness=1.0,
+            metallic=0.0,
+            opacity=1.0,
         )
         wall_NS = sim_utils.CuboidCfg(
             size=(ARENA_SIDE, WALL_THK, WALL_HGT),
@@ -113,7 +149,39 @@ class TekoEnv(DirectRLEnv):
         self._spawn_cuboid_unique(f"{base}/wall_e", wall_EW, (+half, 0.0, zc), (0, 0, 0, 1))
         self._spawn_cuboid_unique(f"{base}/wall_w", wall_EW, (-half, 0.0, zc), (0, 0, 0, 1))
 
-    # ---------- camera USD marker
+    # --- per-env visual floor (brown, no collision)
+    def _spawn_visual_floor_for_env(self, env_index: int):
+        base = f"/World/envs/env_{env_index}"
+        floor_path = f"{base}/visual_floor"
+        if self._prim_exists(floor_path):
+            return
+
+        brown = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.32, 0.22, 0.15),  # earthy brown
+            roughness=1.0,
+            metallic=0.0,
+            opacity=1.0,
+        )
+
+        # Make it a bit larger than the arena to avoid seeing edges.
+        plate_cfg = sim_utils.CuboidCfg(
+            size=(ARENA_SIDE + 2.0, ARENA_SIDE + 2.0, 0.01),
+            visual_material=brown,
+            rigid_props=None,          # visual-only
+            collision_props=None,      # no collisions
+        )
+
+        # Put it slightly above z=0 to avoid z-fighting with the physical ground.
+        sim_utils.spawn_cuboid(
+            prim_path=floor_path,
+            cfg=plate_cfg,
+            translation=(0.0, 0.0, 0.005),
+            orientation=(0, 0, 0, 1),
+        )
+
+    # --------------------------------------------------------------------------
+    # camera injection (rear view, 180° yaw, slight -X offset)
+    # --------------------------------------------------------------------------
     def _set_resolution_meta_int2(self, prim, res_xy: tuple[int, int]):
         """
         Ensure prim has 'user:resolution' as Int2. If an attribute with other type
@@ -135,19 +203,16 @@ class TekoEnv(DirectRLEnv):
         cam_name: str = "cam_rpi_v2",
         resolution=(1280, 960),
     ):
-        # USD imports locais
-        from pxr import Usd, UsdGeom, Gf, Sdf
-
         stage = self._stage()
 
-        # 1) Localiza o robô deste env
+        # 1) find robot in this env
         robot_root = f"/World/envs/env_{env_index}/Robot"
         robot_prim = stage.GetPrimAtPath(robot_root)
         if not robot_prim.IsValid():
             print(f"[cam] robot prim not found at {robot_root}")
             return
 
-        # 2) Acha o Xform alvo (teko_camera) dentro do robô
+        # 2) find the Xform named xform_name under the robot
         xform_path = None
         for prim in Usd.PrimRange(robot_prim):
             if prim.GetName() == xform_name:
@@ -159,20 +224,19 @@ class TekoEnv(DirectRLEnv):
 
         cam_path = f"{xform_path}/{cam_name}"
 
-        # 3) Define o prim tipo Camera e cria o schema corretamente (NÃO transformar em bool)
+        # 3) define camera prim and schema
         cam_prim = stage.DefinePrim(Sdf.Path(cam_path), "Camera")
-        cam = UsdGeom.Camera(cam_prim)  # <- UsdGeom.Camera
+        cam = UsdGeom.Camera(cam_prim)
 
-        # 4) Define o transform local: olhar para a traseira (-X do robô)
-        xf = UsdGeom.Xformable(cam_prim)
-        for op in list(xf.GetOrderedXformOps()):
-            xf.RemoveXformOp(op)
-        # Rotaciona a câmera: no USD ela olha ao longo do -Z; Ry=+90° alinha -Z com -X do robô.
-        xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 180.0, 0.0))
-        # Empurra ~3 cm para fora no -X do robô pra não ficar dentro da carcaça
-        xf.AddTranslateOp().Set(Gf.Vec3d(-0.03, 0.0, 0.0))
+        # 4) transform: USD cameras look along -Z. We want rear view (-X of robot),
+        # so set yaw=180° to turn -Z -> +Z, then use the mounting Xform to align as expected.
+        # Easiest and most compatible: use XformCommonAPI (no RemoveXformOp needed).
+        xapi = UsdGeom.XformCommonAPI(cam_prim)
+        xapi.SetRotate(Gf.Vec3f(0.0, 180.0, 0.0), UsdGeom.XformCommonAPI.RotationOrderXYZ)  # yaw 180°
+        xapi.SetTranslate(Gf.Vec3d(-0.06, 0.0, 0.0))  # 6 cm para fora
 
-        # 5) Intrínsecas IMX219 (mm)
+
+        # 5) intrinsics (IMX219-ish)
         cam.GetFocalLengthAttr().Set(3.04)
         cam.GetHorizontalApertureAttr().Set(3.68)
         cam.GetVerticalApertureAttr().Set(2.76)
@@ -180,34 +244,33 @@ class TekoEnv(DirectRLEnv):
         cam.GetFocusDistanceAttr().Set(1.0)
         cam.GetFStopAttr().Set(2.0)
 
-        # 6) Meta 'user:resolution' com tipo correto (Int2)
-        bad_attr = cam_prim.GetAttribute("user:resolution")
-        if bad_attr and bad_attr.GetTypeName() != Sdf.ValueTypeNames.Int2:
-            cam_prim.RemoveProperty("user:resolution")
-        res_attr = cam_prim.GetAttribute("user:resolution")
-        if not res_attr or res_attr.GetTypeName() != Sdf.ValueTypeNames.Int2:
-            res_attr = cam_prim.CreateAttribute("user:resolution", Sdf.ValueTypeNames.Int2, False)
-        res_attr.Set(Gf.Vec2i(int(resolution[0]), int(resolution[1])))
+        # 6) resolution meta as Int2
+        self._set_resolution_meta_int2(cam_prim, resolution)
 
         print(
             f"[cam] OK {cam_path}  res={int(resolution[0])}x{int(resolution[1])}  "
-            f"primType={cam_prim.GetTypeName()}  rot=(0,90,0)  off=(-0.03,0,0)"
+            f"primType={cam_prim.GetTypeName()}  rot=(0,180,0)  off=(-0.06,0,0)"
         )
 
-    # ---------- internals / RL hooks
+    # --------------------------------------------------------------------------
+    # RL plumbing (minimal)
+    # --------------------------------------------------------------------------
     def _lazy_init_articulation(self):
         if self.dof_idx is not None and self.wheel_signs is not None:
             return
         if getattr(self.robot, "root_physx_view", None) is None:
             return
+
         joint_names = list(self.robot.joint_names)
         name_to_idx = {n: i for i, n in enumerate(joint_names)}
         missing = [n for n in self.cfg.dof_names if n not in name_to_idx]
         if missing:
             raise RuntimeError(f"Missing joints {missing}. Available: {joint_names}")
+
         dof_idx_list = [name_to_idx[n] for n in self.cfg.dof_names]
         self.dof_idx = torch.tensor(dof_idx_list, dtype=torch.long, device=self.device)
         self.wheel_signs = torch.ones(4, device=self.device, dtype=torch.float32)
+
         n = len(self.dof_idx)
         stiffness = torch.zeros(n, device=self.device)
         damping = torch.full((n,), float(self.cfg.drive_damping), device=self.device)
@@ -227,6 +290,7 @@ class TekoEnv(DirectRLEnv):
     def _apply_action(self) -> None:
         if self.dof_idx is None:
             return
+
         pol = float(self.cfg.wheel_polarity)
         if self.cfg.independent_wheels:
             raw = float(self.cfg.action_scale) * self.actions
@@ -237,11 +301,13 @@ class TekoEnv(DirectRLEnv):
             right = (scale * self.actions[:, 1]).unsqueeze(-1)
             raw = torch.hstack([left, right, left, right])
             targets = raw * self.wheel_signs.unsqueeze(0) * pol
+
         max_delta = self._max_wheel_accel * self._env_dt
         delta = torch.clamp(targets - self._targets_prev, -max_delta, +max_delta)
         targets = self._targets_prev + delta
         targets = torch.clamp(targets, -self._max_wheel_speed, +self._max_wheel_speed)
         self._targets_prev = targets.detach()
+
         self.robot.set_joint_velocity_target(targets, joint_ids=self.dof_idx)
 
     def _get_observations(self) -> dict:
@@ -260,8 +326,10 @@ class TekoEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
+
         self._lazy_init_articulation()
         if getattr(self.robot, "root_physx_view", None) is not None:
+            # place robot above per-env origin
             root = self.robot.data.default_root_state[env_ids]
             root[:, :3] = self.scene.env_origins[env_ids]
             root[:, 2] += float(self.cfg.spawn_height)
@@ -269,3 +337,14 @@ class TekoEnv(DirectRLEnv):
                                         device=self.device).repeat(len(env_ids), 1)
             root[:, 7:13] = 0.0
             self.robot.write_root_state_to_sim(root, env_ids)
+
+
+# --------------------------------------------------------------------------
+# Optional local smoke test (you can keep; it's handy to sanity check)
+# --------------------------------------------------------------------------
+if __name__ == "__main__":
+    cfg = TekoEnvCfg()
+    env = TekoEnv(cfg, render_mode="window")  # use "headless" if you don't want a window
+    env.reset()
+    print("Env OK. Closing.")
+    env.close()

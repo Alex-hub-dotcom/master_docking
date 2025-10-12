@@ -40,7 +40,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # Scene: 8 envs with enough spacing for 8x8 m arenas + margin
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,
+        num_envs=30,
         env_spacing=12.0,   # increase to 14.0 if you ever see overlap
         replicate_physics=True,
     )
