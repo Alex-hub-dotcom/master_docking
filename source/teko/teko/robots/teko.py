@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2025
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for the Teko robot"""
+"""Configuration for the Teko robot (wheel joints emulate tracks)."""
 
 from __future__ import annotations
 
@@ -9,16 +9,16 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 
-# Path to your converted USD
-TEKO_PATH = "/workspace/teko/documents/teko_bot.usd"
+# Path to the converted USD
+TEKO_PATH = "/workspace/teko/documents/teko.usd"
 
-# Wheel joint names (new, after URDF → USD):
-# Order we will use everywhere: [FL, FR, RL, RR]
+# Wheel joint names in a consistent order used across the codebase:
+# Convention: [Front-Left, Front-Right, Rear-Left, Rear-Right]
 WHEEL_JOINTS = [
-    "teko_body_Revolucionar_31",  # FL
-    "teko_body_Revolucionar_32",  # FR
-    "teko_body_Revolucionar_33",  # RL
-    "teko_body_Revolucionar_34",  # RR
+    "teko_body_front_left",   # FL
+    "teko_body_front_right",  # FR
+    "teko_body_back_left",    # RL
+    "teko_body_back_right",   # RR
 ]
 
 TEKO_CONFIGURATION = ArticulationCfg(
@@ -31,23 +31,20 @@ TEKO_CONFIGURATION = ArticulationCfg(
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos={
-            # Keep only names that exist in the USD to avoid regex errors
-            "teko_body_Revolucionar_31": 0.0,
-            "teko_body_Revolucionar_32": 0.0,
-            "teko_body_Revolucionar_33": 0.0,
-            "teko_body_Revolucionar_34": 0.0,
-            # If this slider exists in your USD, keep it; otherwise remove the line below
-            "teko_connect_male_Deslizador_19": 0.0,
+            "teko_body_front_left": 0.0,
+            "teko_body_front_right": 0.0,
+            "teko_body_back_left": 0.0,
+            "teko_body_back_right": 0.0,
         }
     ),
     actuators={
-        # Soft velocity-like behavior via high damping, zero stiffness.
-        # Use explicit list to avoid regex mismatches.
+        # Implicit actuator: velocity-like behavior when stiffness=0 and damping>0.
+        # Tuned mild to avoid violent impulses on a ~6 kg platform.
         "wheel_acts": ImplicitActuatorCfg(
-            joint_names_expr=WHEEL_JOINTS,
-            effort_limit_sim=120.0,   # torque limit per wheel
+            joint_names_expr=WHEEL_JOINTS,  # explicit list prevents regex mismatches
+            effort_limit_sim=6.0,           # ~Nm per wheel (XL430-scale, with headroom)
             stiffness=0.0,
-            damping=40.0,             # try 30–60; increase if too “loose”, decrease if jittery
+            damping=30.0,                   # moderate damping; runtime drive gains refine it
         ),
     },
 )

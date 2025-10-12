@@ -9,66 +9,60 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
-from teko.robots.teko import TEKO_CONFIGURATION  # must resolve
+from teko.robots.teko import TEKO_CONFIGURATION
 
 
 @configclass
 class TekoEnvCfg(DirectRLEnvCfg):
-    """Config for TEKO: differential tracks (2 actions) or 4 independent wheels."""
+    """Minimal config for TEKO: ground plane only, linear forward test."""
 
     # Timing
     decimation = 2
     episode_length_s = 5.0
 
     # Spaces
-    action_space = 2                  # set to 4 if independent_wheels=True
-    observation_space = 3             # [dot, cross_z, forward_speed]
+    action_space = 2               # [left, right]
+    observation_space = 1          # forward speed
     state_space = 0
 
     # Simulation
-    sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 120,
+        render_interval=decimation,
+    )
 
     # Robot
     robot_cfg: ArticulationCfg = TEKO_CONFIGURATION.replace(
         prim_path="/World/envs/env_.*/Robot"
     )
 
-    # Scene
+    # Scene (demo may sobrescrever para 1 env)
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=16,
-        env_spacing=4.0,
+        env_spacing=10.0,
         replicate_physics=True,
     )
 
-    # Joint names in order [FL, FR, RL, RR]
+    # Joint names (order: [FL, FR, RL, RR])
     dof_names = [
-        "teko_body_Revolucionar_31",  # FL
-        "teko_body_Revolucionar_32",  # FR
-        "teko_body_Revolucionar_33",  # RL
-        "teko_body_Revolucionar_34",  # RR
+        "teko_body_front_left",
+        "teko_body_front_right",
+        "teko_body_back_left",
+        "teko_body_back_right",
     ]
 
     # Control
-    independent_wheels = False
-    action_scale = 10.0              # start modest; adjust with --scale
-    wheel_polarity = -1.0            # keep if +left/+right previously went backward
+   # Control
+    action_scale = 8.0
+    wheel_polarity = -1.0     # mantenha se “frente” já está correta
 
-    # Drive (if runtime API exists; else actuators cfg handles it)
+    # Drive
     drive_damping = 40.0
-    drive_max_force = 120.0
+    drive_max_force = 30.0    # mais força nas rodas
 
-    # Spawn height (meters) to avoid initial penetration
-    spawn_height = 0.05
+    # Safety / limits
+    max_wheel_speed = 10.0    # rad/s
+    max_wheel_accel = 25.0    # rad/s^2
 
-    # Target smoothing / safety
-    max_wheel_speed = 12.0           # rad/s clamp
-    max_wheel_accel = 30.0           # rad/s^2 slew limit
-
-    # Legacy placeholders (unused)
-    rew_scale_alive = 1.0
-    rew_scale_terminated = -2.0
-    rew_scale_pole_pos = -1.0
-    rew_scale_cart_vel = -0.01
-    rew_scale_pole_vel = -0.005
-    initial_pole_angle_range = [-0.25, 0.25]
-    max_cart_pos = 3.0
+    # (opcional) ajuda a sair da inércia se sentir “travado”
+    ff_torque = 6.0
