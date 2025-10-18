@@ -63,7 +63,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     drive_max_force = 25.0
 
     # Spawn / safety
-    spawn_height = 0.06
+    spawn_height = 0.08
     max_wheel_speed = 12.0
     max_wheel_accel = 60.0
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from collections.abc import Sequence
+import math
 import torch
 
 # Isaac Lab
@@ -17,7 +18,6 @@ from pxr import Sdf, Usd, UsdGeom, Gf
 
 # Project cfg
 from .teko_env_cfg import TekoEnvCfg
-import math
 
 
 # ----- arena constants (visual walls only) -----
@@ -28,8 +28,8 @@ WALL_HGT   = 1.2
 
 class TekoEnv(DirectRLEnv):
     """
-    Simple world: robot + per-env arena (walls) + per-env brown visual floor.
-    Also injects a USD Camera under the robot's "teko_camera" Xform, rotated 180° (rear view).
+    Simple world: two robots per env + arena walls + brown visual floor.
+    Injects a USD Camera under Robot's "teko_camera" Xform, rotated 180° (rear view).
     """
 
     cfg: TekoEnvCfg
@@ -41,9 +41,10 @@ class TekoEnv(DirectRLEnv):
         nenv = self.cfg.scene.num_envs
         a_dim = 4 if self.cfg.independent_wheels else 2
 
-        # action / control bookkeeping
+        # actions / control buffers
         self.actions = torch.zeros((nenv, a_dim), device=device)
-        self._targets_prev = torch.zeros((nenv, 4), device=device)
+        self._targets_prev = torch.zeros((nenv, 4), device=device)     # robot A smoothing
+        self._targets_prev_b = torch.zeros((nenv, 4), device=device)   # robot B smoothing
         self._max_wheel_speed = float(self.cfg.max_wheel_speed)
         self._max_wheel_accel = float(self.cfg.max_wheel_accel)
         self._env_dt = float(self.cfg.decimation) * float(self.cfg.sim.dt)
@@ -51,6 +52,8 @@ class TekoEnv(DirectRLEnv):
         # articulation handles
         self.dof_idx: torch.Tensor | None = None
         self.wheel_signs: torch.Tensor | None = None
+        self.dof_idx_b: torch.Tensor | None = None
+        self.wheel_signs_b: torch.Tensor | None = None
 
     # USD helpers
     def _stage(self):
@@ -74,26 +77,33 @@ class TekoEnv(DirectRLEnv):
             orientation=orientation,
         )
 
-    # scene building
+    # Scene building
     def _setup_scene(self):
-        # 1) robot
+        """Build the simulation scene: two robots per environment, ground, arena, and camera."""
+        # 1) Robots
         self.robot = Articulation(self.cfg.robot_cfg)
+        self.robot_passive = Articulation(
+            self.cfg.robot_cfg.replace(prim_path="/World/envs/env_.*/PassiveRobot")
+        )
 
-        # 2) physical ground (flat infinite, with friction)
+        # 2) Physical ground (infinite flat surface with friction)
         spawn_ground_plane(
             prim_path="/World/ground",
             cfg=GroundPlaneCfg(
                 physics_material=sim_utils.RigidBodyMaterialCfg(
-                    static_friction=0.6, dynamic_friction=0.5, restitution=0.0
+                    static_friction=0.6,
+                    dynamic_friction=0.5,
+                    restitution=0.0,
                 )
             ),
         )
 
-        # 3) register and clone envs
+        # 3) Register and clone environments
         self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.robot
+        self.scene.articulations["robot_passive"] = self.robot_passive
 
-        # 4) per-env content
+        # 4) Per-environment content
         for i in range(self.cfg.scene.num_envs):
             self._spawn_arena_root(i)
             self._spawn_arena_walls(i)
@@ -220,9 +230,7 @@ class TekoEnv(DirectRLEnv):
         cam_prim = stage.DefinePrim(Sdf.Path(cam_path), "Camera")
         cam = UsdGeom.Camera(cam_prim)
 
-        # 4) transform: USD cameras look along -Z. We want rear view (-X of robot),
-        # so set yaw=180° to turn -Z -> +Z, then rely on the mounting Xform for alignment.
-        # Use XformCommonAPI for broad compatibility.
+        # 4) transform
         xapi = UsdGeom.XformCommonAPI(cam_prim)
         xapi.SetRotate(Gf.Vec3f(0.0, 180.0, 0.0), UsdGeom.XformCommonAPI.RotationOrderXYZ)  # yaw 180°
         xapi.SetTranslate(Gf.Vec3d(-0.06, 0.0, 0.0))  # 6 cm outward along -X
@@ -231,7 +239,7 @@ class TekoEnv(DirectRLEnv):
         cam.GetFocalLengthAttr().Set(3.04)
         cam.GetHorizontalApertureAttr().Set(3.68)
         cam.GetVerticalApertureAttr().Set(2.76)
-        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))  # near = 5 cm
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
         cam.GetFocusDistanceAttr().Set(1.0)
         cam.GetFStopAttr().Set(2.0)
 
@@ -243,31 +251,47 @@ class TekoEnv(DirectRLEnv):
             f"primType={cam_prim.GetTypeName()}  rot=(0,180,0)  off=(-0.06,0,0)"
         )
 
-    # RL plumbing (minimal)
+    # RL plumbing (init drives for BOTH robots)
     def _lazy_init_articulation(self):
-        if self.dof_idx is not None and self.wheel_signs is not None:
-            return
-        if getattr(self.robot, "root_physx_view", None) is None:
-            return
+        # Robot A
+        if self.dof_idx is None and getattr(self.robot, "root_physx_view", None) is not None:
+            joint_names = list(self.robot.joint_names)
+            name_to_idx = {n: i for i, n in enumerate(joint_names)}
+            missing = [n for n in self.cfg.dof_names if n not in name_to_idx]
+            if missing:
+                raise RuntimeError(f"Missing joints {missing}. Available: {joint_names}")
+            dof_idx_list = [name_to_idx[n] for n in self.cfg.dof_names]
+            self.dof_idx = torch.tensor(dof_idx_list, dtype=torch.long, device=self.device)
+            self.wheel_signs = torch.ones(4, device=self.device, dtype=torch.float32)
 
-        joint_names = list(self.robot.joint_names)
-        name_to_idx = {n: i for i, n in enumerate(joint_names)}
-        missing = [n for n in self.cfg.dof_names if n not in name_to_idx]
-        if missing:
-            raise RuntimeError(f"Missing joints {missing}. Available: {joint_names}")
+            n = len(self.dof_idx)
+            stiffness = torch.zeros(n, device=self.device)
+            damping = torch.full((n,), float(self.cfg.drive_damping), device=self.device)
+            max_force = torch.full((n,), float(self.cfg.drive_max_force), device=self.device)
+            if hasattr(self.robot, "set_joint_drive_property"):
+                self.robot.set_joint_drive_property(
+                    stiffness=stiffness, damping=damping, max_force=max_force, joint_ids=self.dof_idx
+                )
 
-        dof_idx_list = [name_to_idx[n] for n in self.cfg.dof_names]
-        self.dof_idx = torch.tensor(dof_idx_list, dtype=torch.long, device=self.device)
-        self.wheel_signs = torch.ones(4, device=self.device, dtype=torch.float32)
+        # Robot B (same drive setup)
+        if self.dof_idx_b is None and getattr(self.robot_passive, "root_physx_view", None) is not None:
+            joint_names_b = list(self.robot_passive.joint_names)
+            name_to_idx_b = {n: i for i, n in enumerate(joint_names_b)}
+            missing_b = [n for n in self.cfg.dof_names if n not in name_to_idx_b]
+            if missing_b:
+                raise RuntimeError(f"Missing joints on second robot {missing_b}. Available: {joint_names_b}")
+            dof_idx_list_b = [name_to_idx_b[n] for n in self.cfg.dof_names]
+            self.dof_idx_b = torch.tensor(dof_idx_list_b, dtype=torch.long, device=self.device)
+            self.wheel_signs_b = torch.ones(4, device=self.device, dtype=torch.float32)
 
-        n = len(self.dof_idx)
-        stiffness = torch.zeros(n, device=self.device)
-        damping = torch.full((n,), float(self.cfg.drive_damping), device=self.device)
-        max_force = torch.full((n,), float(self.cfg.drive_max_force), device=self.device)
-        if hasattr(self.robot, "set_joint_drive_property"):
-            self.robot.set_joint_drive_property(
-                stiffness=stiffness, damping=damping, max_force=max_force, joint_ids=self.dof_idx
-            )
+            n = len(self.dof_idx_b)
+            stiffness = torch.zeros(n, device=self.device)
+            damping = torch.full((n,), float(self.cfg.drive_damping), device=self.device)
+            max_force = torch.full((n,), float(self.cfg.drive_max_force), device=self.device)
+            if hasattr(self.robot_passive, "set_joint_drive_property"):
+                self.robot_passive.set_joint_drive_property(
+                    stiffness=stiffness, damping=damping, max_force=max_force, joint_ids=self.dof_idx_b
+                )
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         if actions is None or actions.numel() == 0:
@@ -291,13 +315,21 @@ class TekoEnv(DirectRLEnv):
             raw = torch.hstack([left, right, left, right])
             targets = raw * self.wheel_signs.unsqueeze(0) * pol
 
+        # Smooth & clamp for Robot A
         max_delta = self._max_wheel_accel * self._env_dt
         delta = torch.clamp(targets - self._targets_prev, -max_delta, +max_delta)
-        targets = self._targets_prev + delta
-        targets = torch.clamp(targets, -self._max_wheel_speed, +self._max_wheel_speed)
-        self._targets_prev = targets.detach()
+        targets_a = self._targets_prev + delta
+        targets_a = torch.clamp(targets_a, -self._max_wheel_speed, +self._max_wheel_speed)
+        self._targets_prev = targets_a.detach()
+        self.robot.set_joint_velocity_target(targets_a, joint_ids=self.dof_idx)
 
-        self.robot.set_joint_velocity_target(targets, joint_ids=self.dof_idx)
+        # Same commands for Robot B (with its own smoothing buffer)
+        if self.dof_idx_b is not None:
+            delta_b = torch.clamp(targets - self._targets_prev_b, -max_delta, +max_delta)
+            targets_b = self._targets_prev_b + delta_b
+            targets_b = torch.clamp(targets_b, -self._max_wheel_speed, +self._max_wheel_speed)
+            self._targets_prev_b = targets_b.detach()
+            self.robot_passive.set_joint_velocity_target(targets_b, joint_ids=self.dof_idx_b)
 
     def _get_observations(self) -> dict:
         v_fwd = self.robot.data.root_com_lin_vel_b[:, 0].reshape(-1, 1)
@@ -311,46 +343,111 @@ class TekoEnv(DirectRLEnv):
         terminated = torch.zeros_like(time_out)
         return terminated, time_out
 
-
-
-
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
 
         self._lazy_init_articulation()
+
+        # Force env_ids to a tensor of indices (avoids chained boolean indexing issues)
+        env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        origins_all = self.scene.env_origins[env_ids_t]
+
+        # Spawn params: keep inside arena with wall margin and min separation
+        half = ARENA_SIDE * 0.5
+        margin = 0.7      # distance from walls
+        min_sep = 1.2     # minimum A-B XY separation
+        x_min = -half + margin
+        x_max = +half - margin
+        y_min = -half + margin
+        y_max = +half - margin
+
+        def _sample_xy(n: int):
+            xs = x_min + (x_max - x_min) * torch.rand((n, 1), device=self.device)
+            ys = y_min + (y_max - y_min) * torch.rand((n, 1), device=self.device)
+            return torch.hstack([xs, ys])
+
+        # ===== Robot A =====
         if getattr(self.robot, "root_physx_view", None) is not None:
-            root = self.robot.data.default_root_state[env_ids]
+            root_a = self.robot.data.default_root_state[env_ids_t]
 
-            # ===== Random position in local arena (x, y in [-3.5, +3.5], z fixed) =====
-            half_range = 3.5
-            xy_random = 2 * half_range * (torch.rand((len(env_ids), 2), device=self.device) - 0.5)
-            z = torch.full((len(env_ids), 1), float(self.cfg.spawn_height), device=self.device)
-            xyz_local = torch.cat([xy_random, z], dim=-1)
-            xyz_global = self.scene.env_origins[env_ids] + xyz_local
-            root[:, :3] = xyz_global
+            xy_a = _sample_xy(len(env_ids_t))
+            z = torch.full((len(env_ids_t), 1), float(self.cfg.spawn_height), device=self.device)
+            pos_a_local = torch.cat([xy_a, z], dim=-1)
+            pos_a_world = origins_all + pos_a_local
+            root_a[:, :3] = pos_a_world
 
-            # ===== Random yaw (rotation around Z axis only, no tilt) =====
-            import math
-            yaw = 2 * math.pi * torch.rand(len(env_ids), device=self.device)
-            quat_y = torch.stack([
-                torch.sin(yaw / 2),            # x
-                torch.zeros_like(yaw),         # y
-                torch.zeros_like(yaw),         # z
-                torch.cos(yaw / 2),            # w
+            # Random yaw (keeping Fusion-import X-axis convention)
+            yaw_a = 2 * math.pi * torch.rand(len(env_ids_t), device=self.device)
+            quat_a = torch.stack([
+                torch.sin(yaw_a / 2),            # x
+                torch.zeros_like(yaw_a),         # y
+                torch.zeros_like(yaw_a),         # z
+                torch.cos(yaw_a / 2),            # w
             ], dim=1)
-            root[:, 3:7] = quat_y
+            root_a[:, 3:7] = quat_a
 
-            # ===== Zero velocities =====
-            root[:, 7:13] = 0.0
+            root_a[:, 7:13] = 0.0
+            self.robot.write_root_state_to_sim(root_a, env_ids_t)
 
-            self.robot.write_root_state_to_sim(root, env_ids)
+        # ===== Robot B (rejection sampling with integer indices) =====
+        if getattr(self.robot_passive, "root_physx_view", None) is not None:
+            root_b = self.robot_passive.data.default_root_state[env_ids_t]
 
+            remaining = env_ids_t.clone()                      # env indices still needing a pose
+            pos_b_world = torch.empty((len(env_ids_t), 3), device=self.device)
+            attempts = 0
+            max_attempts = 10
 
+            while remaining.numel() > 0 and attempts < max_attempts:
+                origins_rem = self.scene.env_origins[remaining]
+                xy_b = _sample_xy(remaining.numel())
+                z = torch.full((remaining.numel(), 1), float(self.cfg.spawn_height), device=self.device)
+                pos_b_local = torch.cat([xy_b, z], dim=-1)
+                cand_world = origins_rem + pos_b_local
 
+                # distance to A in the same envs
+                pos_a_world_now = self.robot.data.root_state_w[remaining, :3]
+                dist = torch.linalg.norm(cand_world[:, :2] - pos_a_world_now[:, :2], dim=1)
+                ok_mask = dist >= min_sep
 
+                if ok_mask.any():
+                    approved_envs = remaining[ok_mask]          # absolute env indices
+                    # map approved envs back to positions in the full env_ids_t array
+                    map_mask = (env_ids_t.unsqueeze(1) == approved_envs).any(dim=1)
+                    pos_b_world[map_mask] = cand_world[ok_mask]
 
+                remaining = remaining[~ok_mask]
+                attempts += 1
+
+            # Fallback for any leftovers: mirror across origin and clamp to bounds
+            if remaining.numel() > 0:
+                origins_rem = self.scene.env_origins[remaining]
+                pos_a_world_now = self.robot.data.root_state_w[remaining, :3]
+                mirrored = origins_rem - (pos_a_world_now - origins_rem)
+                rel = mirrored - origins_rem
+                rel[:, 0] = torch.clamp(rel[:, 0], x_min, x_max)
+                rel[:, 1] = torch.clamp(rel[:, 1], y_min, y_max)
+                fixed = origins_rem + rel
+
+                map_mask = (env_ids_t.unsqueeze(1) == remaining).any(dim=1)
+                pos_b_world[map_mask] = fixed
+                pos_b_world[map_mask, 2] = float(self.cfg.spawn_height)
+
+            # Independent yaw for B (same X-axis convention)
+            yaw_b = 2 * math.pi * torch.rand(len(env_ids_t), device=self.device)
+            quat_b = torch.stack([
+                torch.sin(yaw_b / 2),            # x
+                torch.zeros_like(yaw_b),         # y
+                torch.zeros_like(yaw_b),         # z
+                torch.cos(yaw_b / 2),            # w
+            ], dim=1)
+
+            root_b[:, :3] = pos_b_world
+            root_b[:, 3:7] = quat_b
+            root_b[:, 7:13] = 0.0
+            self.robot_passive.write_root_state_to_sim(root_b, env_ids_t)
 
 
 # Optional local smoke test (handy to sanity check)
