@@ -17,6 +17,7 @@ from pxr import Sdf, Usd, UsdGeom, Gf
 
 # Project cfg
 from .teko_env_cfg import TekoEnvCfg
+import math
 
 
 # ----- arena constants (visual walls only) -----
@@ -310,6 +311,9 @@ class TekoEnv(DirectRLEnv):
         terminated = torch.zeros_like(time_out)
         return terminated, time_out
 
+
+
+
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
@@ -317,14 +321,36 @@ class TekoEnv(DirectRLEnv):
 
         self._lazy_init_articulation()
         if getattr(self.robot, "root_physx_view", None) is not None:
-            # place robot above the per-env origin
             root = self.robot.data.default_root_state[env_ids]
-            root[:, :3] = self.scene.env_origins[env_ids]
-            root[:, 2] += float(self.cfg.spawn_height)
-            root[:, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0],
-                                        device=self.device).repeat(len(env_ids), 1)
+
+            # ===== Random position in local arena (x, y in [-3.5, +3.5], z fixed) =====
+            half_range = 3.5
+            xy_random = 2 * half_range * (torch.rand((len(env_ids), 2), device=self.device) - 0.5)
+            z = torch.full((len(env_ids), 1), float(self.cfg.spawn_height), device=self.device)
+            xyz_local = torch.cat([xy_random, z], dim=-1)
+            xyz_global = self.scene.env_origins[env_ids] + xyz_local
+            root[:, :3] = xyz_global
+
+            # ===== Random yaw (rotation around Z axis only, no tilt) =====
+            import math
+            yaw = 2 * math.pi * torch.rand(len(env_ids), device=self.device)
+            quat_y = torch.stack([
+                torch.sin(yaw / 2),            # x
+                torch.zeros_like(yaw),         # y
+                torch.zeros_like(yaw),         # z
+                torch.cos(yaw / 2),            # w
+            ], dim=1)
+            root[:, 3:7] = quat_y
+
+            # ===== Zero velocities =====
             root[:, 7:13] = 0.0
+
             self.robot.write_root_state_to_sim(root, env_ids)
+
+
+
+
+
 
 
 # Optional local smoke test (handy to sanity check)

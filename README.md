@@ -27,6 +27,13 @@ The project investigates how small-scale agricultural robots can physically conn
 - **USD and URDF** for robot modeling
 - **ROS 2 (planned)** for hardware-level implementation and control
 
+## Implementation Notes
+## ACHTUNG!
+The TEKO robot model was originally exported from **Fusion 360**, which uses **Y-up** as the vertical axis by default.  
+Because of this, the simulation environment uses **rotations around the Y-axis** instead of the conventional Z-axis when randomizing robot heading direction during reset. This ensures that robots start **upright** and oriented in various directions within the environment.  
+
+If using Z-up models (Omniverse-native or manually converted), you may revert to Z-axis rotations accordingly.
+
 ## Contact
 
 For questions, feedback, or collaboration opportunities, please contact:
