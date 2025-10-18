@@ -1,0 +1,64 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Compiled C extensions
+*.so
+
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+
+# Jupyter/IPython
+.ipynb_checkpoints
+
+# Setup / Packaging
+*.egg-info/
+dist/
+build/
+
+# IDEs / Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs and training outputs
+logs/
+*.log
+*.tfevents.*
+
+# Checkpoints and model files
+checkpoints/
+*.pt
+*.pkl
+*.yaml
+
+# NVIDIA / Isaac Sim user/config data
+*.usd_preview_surface.*
+*.bak.usd
+*.blend1
+*.blend2
+*.usda
+*.usdc
+*.usdz
+*.nvdata
+*.nvconfig
+
+# OS-generated
+.DS_Store
+Thumbs.db
+
+# Temporary / crash files
+*.tmp
+*.temp
+*.~lock.*
+*.crash
+
+# Camera or video cache
+_cam_out/
+*.mp4
+*.avi

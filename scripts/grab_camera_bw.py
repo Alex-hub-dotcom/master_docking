@@ -9,7 +9,7 @@ def main(headless=False):
     import numpy as np
     import omni.replicator.core as rep
 
-    # sua env/task
+
     from teko.tasks.direct.teko.teko_env import TekoEnv
     from teko.tasks.direct.teko.teko_env_cfg import TekoEnvCfg
 
