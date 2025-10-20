@@ -1,0 +1,420 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="teko_urdf">
+    <link name="TEKO_Camera">
+        <inertial>
+            <origin xyz="-0.1733139717851245 0.0006019928284608307 0.03104886536857013" rpy="0.0 0.0 0.0" />
+            <mass value="0.0012386847723750993" />
+            <inertia ixx="8.802945438877092e-08" iyy="4.8387352484333547e-08" izz="4.6264823358249055e-08" ixy="2.2564689916967456e-09" iyz="-2.670730399994618e-10" ixz="-1.219032712882929e-10" />
+        </inertial>
+        <visual name="TEKO_Camera_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Camera.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_Camera_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Camera.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_ChassiUpper">
+        <inertial>
+            <origin xyz="-0.016915404965655145 -5.366708442303729e-06 -6.249616270203821e-07" rpy="0.0 0.0 0.0" />
+            <mass value="2.95242908958936" />
+            <inertia ixx="0.01999458462725553" iyy="0.04781452566537223" izz="0.045022886958473146" ixy="7.98821124831476e-07" iyz="7.462875439248402e-12" ixz="0.000912745748543324" />
+        </inertial>
+        <visual name="TEKO_ChassiUpper_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ChassiUpper.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_ChassiUpper_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ChassiUpper.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_MotorRight-1">
+        <inertial>
+            <origin xyz="-0.0933411491513843 0.0514499581580134 -0.14100412177660132" rpy="0.0 0.0 0.0" />
+            <mass value="0.3338580457563576" />
+            <inertia ixx="8.973366212871453e-05" iyy="8.072317212791738e-05" izz="5.3105955170764003e-05" ixy="-3.0329953063391174e-08" iyz="2.442400799482214e-06" ixz="2.463780335044269e-08" />
+        </inertial>
+        <visual name="TEKO_MotorRight-1_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_MotorRight-1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_MotorRight-1_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_MotorRight-1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_Chassi-9">
+        <inertial>
+            <origin xyz="-0.02594189869726395 0.0002000000000109417 -0.10419874598502009" rpy="0.0 0.0 0.0" />
+            <mass value="0.8515121958050561" />
+            <inertia ixx="0.00457924936367241" iyy="0.005852943616159432" izz="0.008936946269037955" ixy="2.2171307622947597e-15" iyz="1.910228702647898e-17" ixz="0.00033819374108050694" />
+        </inertial>
+        <visual name="TEKO_Chassi-9_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Chassi-9.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_Chassi-9_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Chassi-9.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_WheelBackLeft">
+        <inertial>
+            <origin xyz="-6.3859623637085866e-06 3.516300231414249e-06 0.016665183114054346" rpy="0.0 -0.0 0.0" />
+            <mass value="0.26591647257735795" />
+            <inertia ixx="9.323502247751692e-05" iyy="9.320985642880149e-05" izz="0.00010878868702309322" ixy="-1.5932751674854057e-08" iyz="-2.2561326166667395e-09" ixz="3.0307445485558415e-10" />
+        </inertial>
+        <visual name="TEKO_WheelBackLeft_visual">
+            <origin xyz="0.09334723 -0.15315 -0.08220000000000001" rpy="1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelBackLeft.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_WheelBackLeft_collision">
+            <origin xyz="0.09334723 -0.15315 -0.08220000000000001" rpy="1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelBackLeft.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_WheelFrontLeft">
+        <inertial>
+            <origin xyz="-6.385963306385634e-06 3.5163002310945045e-06 0.016665183114054346" rpy="0.0 -0.0 0.0" />
+            <mass value="0.26591647257735956" />
+            <inertia ixx="9.323502247751345e-05" iyy="9.3209856425705e-05" izz="0.00010878868701999327" ixy="-1.593278872204229e-08" iyz="-2.2561326123299308e-09" ixz="3.0305054125878694e-10" />
+        </inertial>
+        <visual name="TEKO_WheelFrontLeft_visual">
+            <origin xyz="-0.08055277000000001 -0.15315 -0.08220000000000001" rpy="1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelFrontLeft.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_WheelFrontLeft_collision">
+            <origin xyz="-0.08055277000000001 -0.15315 -0.08220000000000001" rpy="1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelFrontLeft.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_ConnectorRear">
+        <inertial>
+            <origin xyz="-0.20415240374063423 2.6710807143598354e-05 -0.07244435057390333" rpy="0.0 0.0 0.0" />
+            <mass value="0.610171436349428" />
+            <inertia ixx="0.00028384080125114057" iyy="0.0003131463573876822" izz="0.0004380018496381241" ixy="-1.5751535527077662e-07" iyz="-1.355720866895856e-07" ixz="9.906871849972923e-06" />
+        </inertial>
+        <visual name="TEKO_ConnectorRear_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ConnectorRear.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_ConnectorRear_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ConnectorRear.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_Roof">
+        <inertial>
+            <origin xyz="-0.014742565030723399 -0.00013484820936169754 0.09765091024417259" rpy="0.0 0.0 0.0" />
+            <mass value="3.3827878946759804" />
+            <inertia ixx="0.007869878080337067" iyy="0.031861060306351434" izz="0.03860295468346278" ixy="-1.3108241382741754e-05" iyz="-3.116276818049191e-06" ixz="-0.0015932655402093373" />
+        </inertial>
+        <visual name="TEKO_Roof_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Roof.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_Roof_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Roof.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_ConnectorPin">
+        <inertial>
+            <origin xyz="-0.0015095352401585682 -3.289327893151173e-06 -0.019480961266549777" rpy="0.0 -0.0 0.0" />
+            <mass value="0.06016190580093297" />
+            <inertia ixx="3.435883329441997e-05" iyy="3.442432927006599e-05" izz="1.8486177547888242e-06" ixy="1.628686447583995e-10" iyz="4.252978698039817e-09" ixz="-1.7259695517368029e-06" />
+        </inertial>
+        <visual name="TEKO_ConnectorPin_visual">
+            <origin xyz="0.03443908903059994 6.478343389359364e-05 0.22449999924004055" rpy="6.123233995736766e-17 1.5707963267948966 0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ConnectorPin.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_ConnectorPin_collision">
+            <origin xyz="0.03443908903059994 6.478343389359364e-05 0.22449999924004055" rpy="6.123233995736766e-17 1.5707963267948966 0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ConnectorPin.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_ConnectorMale">
+        <inertial>
+            <origin xyz="0.20114932926772786 -5.767598969780543e-05 -0.06797628229264052" rpy="0.0 0.0 0.0" />
+            <mass value="0.5231990984505147" />
+            <inertia ixx="0.00017902307127131952" iyy="0.00020105615532757873" izz="0.0002953689188779085" ixy="1.459040578149511e-09" iyz="4.319944780006716e-08" ixz="2.181889808785479e-05" />
+        </inertial>
+        <visual name="TEKO_ConnectorMale_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ConnectorMale.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_ConnectorMale_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_ConnectorMale.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_WallBack">
+        <inertial>
+            <origin xyz="-0.17000000000000007 1.351244351458828e-06 1.1672149586197624e-06" rpy="0.0 0.0 0.0" />
+            <mass value="0.4287599869279915" />
+            <inertia ixx="0.000794910589929738" iyy="0.0004733837357323526" izz="0.00032331335414291507" ixy="-4.908820627134687e-19" iyz="-4.1920391196779723e-19" ixz="9.481739751123841e-19" />
+        </inertial>
+        <visual name="TEKO_WallBack_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WallBack.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_WallBack_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WallBack.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_GlassAruco">
+        <inertial>
+            <origin xyz="0.09475000000000008 3.462034064888749e-05 -0.048000043674967595" rpy="0.0 0.0 0.0" />
+            <mass value="0.4157500974060791" />
+            <inertia ixx="0.0003135448420959027" iyy="0.00043159188537814" izz="0.0007434044814638818" ixy="6.988021814847978e-21" iyz="2.3611043404713622e-20" ixz="2.168404344971009e-19" />
+        </inertial>
+        <visual name="TEKO_GlassAruco_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_GlassAruco.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_GlassAruco_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_GlassAruco.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_WheelBackRight">
+        <inertial>
+            <origin xyz="-6.859131313365907e-06 -3.2435953770715288e-06 0.016665264106687873" rpy="0.0 -0.0 0.0" />
+            <mass value="0.26593113960593123" />
+            <inertia ixx="9.324121331082645e-05" iyy="9.321577936850615e-05" izz="0.00010879791094810763" ixy="1.5887236907551755e-08" iyz="1.9369397188592763e-09" ixz="7.542198944381073e-10" />
+        </inertial>
+        <visual name="TEKO_WheelBackRight_visual">
+            <origin xyz="0.09334723 0.15314999999999998 -0.08219999999999969" rpy="-1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelBackRight.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_WheelBackRight_collision">
+            <origin xyz="0.09334723 0.15314999999999998 -0.08219999999999969" rpy="-1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelBackRight.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_WheelFrontRight">
+        <inertial>
+            <origin xyz="-6.859132255794264e-06 -3.2435953769294204e-06 0.01666526410668812" rpy="0.0 -0.0 0.0" />
+            <mass value="0.265931139605929" />
+            <inertia ixx="9.324121331081951e-05" iyy="9.32157793654036e-05" izz="0.00010879791094500248" ixy="1.5887273951270542e-08" iyz="1.9369397145224676e-09" ixz="7.541959817086719e-10" />
+        </inertial>
+        <visual name="TEKO_WheelFrontRight_visual">
+            <origin xyz="-0.08055276999999997 0.15314999999999998 -0.08219999999999969" rpy="-1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelFrontRight.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_WheelFrontRight_collision">
+            <origin xyz="-0.08055276999999997 0.15314999999999998 -0.08219999999999969" rpy="-1.5707963267948966 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_WheelFrontRight.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_GlassBase">
+        <inertial>
+            <origin xyz="0.0 -2.1697255365251463e-17 -0.07955000000000004" rpy="0.0 0.0 0.0" />
+            <mass value="1.645261875" />
+            <inertia ixx="0.00250151785207031" iyy="0.01632171760207031" izz="0.0188176826953125" ixy="0.0" iyz="2.0704646885860851e-19" ixz="1.5171508493949657e-18" />
+        </inertial>
+        <visual name="TEKO_GlassBase_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_GlassBase.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_GlassBase_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_GlassBase.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_MotorRight">
+        <inertial>
+            <origin xyz="-0.09334114816329932 -0.051349958228861965 -0.14100412098224982" rpy="0.0 0.0 0.0" />
+            <mass value="0.3338580304078961" />
+            <inertia ixx="8.973365588504836e-05" iyy="8.072316618446679e-05" izz="5.310595248353856e-05" ixy="3.032954938586574e-08" iyz="-2.442401177424249e-06" ixz="2.4641531956408336e-08" />
+        </inertial>
+        <visual name="TEKO_MotorRight_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_MotorRight.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_MotorRight_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_MotorRight.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_BoardSupport">
+        <inertial>
+            <origin xyz="-0.034962767327861216 0.00045975990233245844 -0.025881574331175945" rpy="0.0 0.0 0.0" />
+            <mass value="0.5529059120022721" />
+            <inertia ixx="0.0008177542824251939" iyy="0.0017570483083201663" izz="0.0015057952033683208" ixy="1.7070123732224036e-06" iyz="-3.1123699121447204e-06" ixz="6.299714206125297e-05" />
+        </inertial>
+        <visual name="TEKO_BoardSupport_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_BoardSupport.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_BoardSupport_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_BoardSupport.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_BoardSupport-1">
+        <inertial>
+            <origin xyz="0.06341416377358917 3.7682011894659095e-05 -0.009061870544680635" rpy="0.0 0.0 0.0" />
+            <mass value="2.3849467441322254" />
+            <inertia ixx="0.005902770308334927" iyy="0.006875440791084524" izz="0.0064890490351207746" ixy="1.7229241515976818e-06" iyz="-1.1841492390707912e-06" ixz="0.001799430879032202" />
+        </inertial>
+        <visual name="TEKO_BoardSupport-1_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_BoardSupport-1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_BoardSupport-1_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_BoardSupport-1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_LidarBase">
+        <inertial>
+            <origin xyz="0.12485164854911719 -9.986241876304708e-05 0.06009485501459378" rpy="0.0 0.0 0.0" />
+            <mass value="1.1102585236884506" />
+            <inertia ixx="0.0010640636716937367" iyy="0.0011125938431862867" izz="0.001894155103416298" ixy="-3.458786969206716e-07" iyz="1.1007300877713386e-06" ixz="6.285840197465392e-05" />
+        </inertial>
+        <visual name="TEKO_LidarBase_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_LidarBase.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_LidarBase_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_LidarBase.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="TEKO_Lidar">
+        <inertial>
+            <origin xyz="1.5987211554602254e-16 -3.776197935464734e-16 0.012793510169861194" rpy="0.0 -0.0 0.0" />
+            <mass value="0.7568849745795749" />
+            <inertia ixx="0.0002679588604133741" iyy="0.0002679522742183339" izz="0.0004518700276174327" ixy="-4.194475877739061e-18" iyz="1.3594097803562937e-18" ixz="-2.168404344971009e-18" />
+        </inertial>
+        <visual name="TEKO_Lidar_visual">
+            <origin xyz="-0.145 -7.105427357601001e-17 0.04326753999999999" rpy="3.141592653589793 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Lidar.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="TEKO_Lidar_collision">
+            <origin xyz="-0.145 -7.105427357601001e-17 0.04326753999999999" rpy="3.141592653589793 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/TEKO_Lidar.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <joint name="TEKO_LidarBase_JointLidar" type="continuous">
+        <origin xyz="0.145 0.0 0.04376754" rpy="3.141592653589793 -0.0 0.0" />
+        <parent link="TEKO_LidarBase" />
+        <child link="TEKO_Lidar" />
+        <axis xyz="0.0 0.0 1.0" />
+    </joint>
+    <joint name="TEKO_Chassi-9_JointWheelFrontRight" type="continuous">
+        <origin xyz="0.08055277000000001 -0.0818 -0.15315" rpy="1.5707963267948966 -0.0 0.0" />
+        <parent link="TEKO_Chassi-9" />
+        <child link="TEKO_WheelFrontRight" />
+        <axis xyz="0.0 0.0 1.0" />
+    </joint>
+    <joint name="TEKO_Chassi-9_JointWheelBackRight" type="continuous">
+        <origin xyz="-0.09334723 -0.0818 -0.15315" rpy="1.5707963267948966 -0.0 0.0" />
+        <parent link="TEKO_Chassi-9" />
+        <child link="TEKO_WheelBackRight" />
+        <axis xyz="0.0 0.0 1.0" />
+    </joint>
+    <joint name="TEKO_Chassi-9_JointWheelBackLeft" type="continuous">
+        <origin xyz="-0.09334723 0.08220000000000001 -0.15315" rpy="-1.5707963267948966 -0.0 0.0" />
+        <parent link="TEKO_Chassi-9" />
+        <child link="TEKO_WheelBackLeft" />
+        <axis xyz="0.0 0.0 1.0" />
+    </joint>
+    <joint name="TEKO_Chassi-9_JointWheelFrontLeft" type="continuous">
+        <origin xyz="0.08055277000000001 0.08220000000000001 -0.15315" rpy="-1.5707963267948966 -0.0 0.0" />
+        <parent link="TEKO_Chassi-9" />
+        <child link="TEKO_WheelFrontLeft" />
+        <axis xyz="0.0 0.0 1.0" />
+    </joint>
+    <joint name="TEKO_ConnectorMale_JointPin" type="prismatic">
+        <origin xyz="0.22899999999999998 9.93e-06 -0.06425" rpy="-0.0 -1.5707963267948966 0" />
+        <parent link="TEKO_ConnectorMale" />
+        <child link="TEKO_ConnectorPin" />
+        <axis xyz="0.0 0.0 1.0" />
+        <limit lower="0.024" upper="0.041" effort="1000000" velocity="1000000" />
+    </joint>
+</robot>
