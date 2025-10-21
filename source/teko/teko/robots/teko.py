@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2025
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for the Teko robot (wheel joints emulate tracks)."""
+"""Configuration for the TEKO robot (wheel joints emulate tracks)."""
 
 from __future__ import annotations
 
@@ -10,41 +10,36 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 
 # Path to the converted USD
-TEKO_PATH = "/workspace/teko/documents/teko.usd"
+TEKO_PATH = "/workspace/teko/documents/CAD/USD/teko.usd"
 
-# Wheel joint names in a consistent order used across the codebase:
+# Wheel joint names in the USD (prefix TEKO_Body_)
 # Convention: [Front-Left, Front-Right, Rear-Left, Rear-Right]
 WHEEL_JOINTS = [
-    "teko_body_front_left",   # FL
-    "teko_body_front_right",  # FR
-    "teko_body_back_left",    # RL
-    "teko_body_back_right",   # RR
+    "TEKO_Body_FrontLeft",   # FL
+    "TEKO_Body_FrontRight",  # FR
+    "TEKO_Body_BackLeft",    # RL
+    "TEKO_Body_BackRight",   # RR
 ]
 
+# Articulation configuration
 TEKO_CONFIGURATION = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=TEKO_PATH,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False
+            enabled_self_collisions=False,
         ),
         activate_contact_sensors=False,
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        joint_pos={
-            "teko_body_front_left": 0.0,
-            "teko_body_front_right": 0.0,
-            "teko_body_back_left": 0.0,
-            "teko_body_back_right": 0.0,
-        }
+        joint_pos={joint: 0.0 for joint in WHEEL_JOINTS},
     ),
     actuators={
-        # Implicit actuator: velocity-like behavior when stiffness=0 and damping>0.
-        # Tuned mild to avoid violent impulses on a ~6 kg platform.
+        # Implicit actuator — behaves like velocity control when stiffness=0 and damping>0.
         "wheel_acts": ImplicitActuatorCfg(
-            joint_names_expr=WHEEL_JOINTS,  # explicit list prevents regex mismatches
-            effort_limit_sim=6.0,           # ~Nm per wheel (XL430-scale, with headroom)
+            joint_names_expr=WHEEL_JOINTS,   # explicit list, no regex ambiguity
+            effort_limit_sim=6.0,            # Nm per wheel
             stiffness=0.0,
-            damping=30.0,                   # moderate damping; runtime drive gains refine it
+            damping=30.0,                    # stable damping for ~6kg robot
         ),
     },
 )
