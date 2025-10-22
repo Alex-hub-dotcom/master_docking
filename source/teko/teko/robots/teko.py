@@ -12,13 +12,13 @@ from isaaclab.actuators import ImplicitActuatorCfg
 # Path to the converted USD
 TEKO_PATH = "/workspace/teko/documents/CAD/USD/teko.usd"
 
-# Wheel joint names in the USD (prefix TEKO_Body_)
+# Wheel joint names in the USD (prefix TEKO_Chassi_)
 # Convention: [Front-Left, Front-Right, Rear-Left, Rear-Right]
 WHEEL_JOINTS = [
-    "TEKO_Body_FrontLeft",   # FL
-    "TEKO_Body_FrontRight",  # FR
-    "TEKO_Body_BackLeft",    # RL
-    "TEKO_Body_BackRight",   # RR
+    "TEKO_Chassi_JointWheelFrontLeft",   # FL
+    "TEKO_Chassi_JointWheelFrontRight",  # FR
+    "TEKO_Chassi_JointWheelBackLeft",    # RL
+    "TEKO_Chassi_JointWheelBackRight",   # RR
 ]
 
 # Articulation configuration

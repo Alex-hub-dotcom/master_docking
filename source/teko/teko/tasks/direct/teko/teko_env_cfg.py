@@ -33,10 +33,10 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # DOF names (must match the USD joint names)
     dof_names = [
-        "TEKO_Body_FrontLeft",
-        "TEKO_Body_FrontRight",
-        "TEKO_Body_BackLeft",
-        "TEKO_Body_BackRight",
+        "TEKO_Chassi_JointWheelFrontLeft",   
+        "TEKO_Chassi_JointWheelFrontRight",  
+        "TEKO_Chassi_JointWheelBackLeft",    
+        "TEKO_Chassi_JointWheelBackRight",
     ]
 
     # Control parameters
