@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2025
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Environment to visualize the TEKO robot moving inside a custom arena with random spawn."""
+"""Environment to visualize the TEKO robot moving inside the custom stage_arena.usd."""
 
 from __future__ import annotations
 import math
@@ -17,10 +17,11 @@ from omni.usd import get_context
 from pxr import Usd, Sdf, UsdGeom, Gf
 
 from .teko_env_cfg import TekoEnvCfg
-
+from .robots.teko import TEKO_CONFIGURATION
+from .sensors.camera import ensure_teko_camera   # ✅ substitui Camera wrapper
 
 class TekoEnv(DirectRLEnv):
-    """Single-robot environment with random initial pose."""
+    """Single-robot environment with random initial pose and modular sensors (camera, etc.)."""
 
     cfg: TekoEnvCfg
 
@@ -30,66 +31,85 @@ class TekoEnv(DirectRLEnv):
         self.actions = torch.zeros((1, 2), device=self.device)
         self._max_wheel_speed = float(cfg.max_wheel_speed)
         self.dof_idx = None
+        self.sensors = {}
 
     # ------------------------------------------------------------------
     def _setup_scene(self):
-        """Load arena, spawn the TEKO robot and place it at a random pose (USD-level, pre-physics)."""
-        # Carrega arena via omni.usd (compatível com 0.47.1)
+        """Load arena, spawn the TEKO robot and attach sensors."""
         try:
             stage = get_context().get_stage()
             if not stage:
                 raise RuntimeError("Stage not initialized")
 
-            arena_path = "/workspace/teko/documents/CAD/USD/arena.usd"
-            arena_prim_path = "/World/Arena"
+            arena_path = "/workspace/teko/documents/CAD/USD/stage_arena.usd"
+            arena_prim_path = "/World/StageArena"
+
             stage.DefinePrim(Sdf.Path(arena_prim_path), "Xform")
-            stage.GetPrimAtPath(arena_prim_path).GetReferences().AddReference(arena_path)
-            print(f"✅ Arena carregada via omni.usd: {arena_path}")
+            arena_prim = stage.GetPrimAtPath(arena_prim_path)
+            arena_prim.GetReferences().AddReference(arena_path)
+
+            UsdGeom.Xformable(arena_prim).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.0))
+            print(f"✅ Arena carregada: {arena_path} → {arena_prim_path}")
         except Exception as e:
             print(f"⚠️ Erro ao carregar arena: {e}")
-            print("Carregando plano básico no lugar...")
             spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        # Spawn TEKO
-        from teko.robots.teko import TEKO_CONFIGURATION
+        # --- Spawn do robô TEKO
         self.robot = Articulation(TEKO_CONFIGURATION.replace(prim_path="/World/Robot"))
         self.scene.articulations["robot"] = self.robot
 
-        # Antes de iniciar a física, coloca o prim em pose aleatória via USD (garante variação a cada execução)
+        # --- Sensores
+        self._attach_sensors()
+
+        # --- Pose inicial
         self._usd_randomize_robot_pose()
 
-        # Finaliza a cena
+        # --- Multi-env clones
         self.scene.clone_environments(copy_from_source=False)
 
     # ------------------------------------------------------------------
+    def _attach_sensors(self):
+        """Cria e adiciona sensores (USD camera)."""
+        # garante o dicionário
+        if not hasattr(self, "sensors") or self.sensors is None:
+            self.sensors = {}
+
+        try:
+            cam_path = ensure_teko_camera(resolution=(640, 480))
+            self.sensors["front_camera"] = cam_path
+            print(f"📷 Câmera TEKO garantida em {cam_path}")
+        except Exception as e:
+            print(f"⚠️ Falha ao criar câmera: {e}")
+
+    # ------------------------------------------------------------------
     def _usd_randomize_robot_pose(self):
-        """Define uma pose aleatória via USD (funciona pré-física em 0.47.1)."""
+        """Define uma pose aleatória via USD (pré-física)."""
         try:
             stage = get_context().get_stage()
             robot_prim = stage.GetPrimAtPath("/World/Robot")
             if not robot_prim:
-                print("⚠️ USD: prim do robô não encontrado para randomização inicial.")
+                print("⚠️ USD: prim do robô não encontrado.")
                 return
 
-            # área 8x8 m
-            x = random.uniform(-4.0, 4.0)
-            y = random.uniform(-4.0, 4.0)
-            z = 0.15
+            x = random.uniform(-1.4, 1.4)
+            y = random.uniform(-1.9, 1.9)
+            z = 0.43
             yaw_deg = random.uniform(-180.0, 180.0)
 
             xf = UsdGeom.Xformable(robot_prim)
-            # Limpa a ordem e reescreve ops (translate + rotateZ)
             xf.ClearXformOpOrder()
             t_op = xf.AddTranslateOp()
-            r_op = xf.AddRotateZOp()  # graus
+            r_op = xf.AddRotateZOp()
             t_op.Set(Gf.Vec3d(x, y, z))
             r_op.Set(yaw_deg)
-            print(f"🎯 Spawn inicial (USD): x={x:.2f} y={y:.2f} z={z:.2f} yaw={yaw_deg:.1f}°")
+
+            print(f"🎯 Spawn inicial: x={x:.2f} y={y:.2f} z={z:.2f} yaw={yaw_deg:.1f}°")
         except Exception as e:
-            print(f"⚠️ Falha na randomização USD do robô: {e}")
+            print(f"⚠️ Falha na randomização USD: {e}")
 
     # ------------------------------------------------------------------
     def _lazy_init_articulation(self):
+        """Inicializa índices de DOF quando a articulação estiver pronta."""
         if self.dof_idx is not None:
             return
         if getattr(self.robot, "root_physx_view", None) is None:
@@ -116,7 +136,14 @@ class TekoEnv(DirectRLEnv):
 
     # ------------------------------------------------------------------
     def _get_observations(self):
-        return {}
+        """Retorna observações (sem stream RGB ativo)."""
+        obs = {
+            "joint_pos": self.robot.data.joint_pos,
+            "joint_vel": self.robot.data.joint_vel,
+        }
+        if "front_camera" in self.sensors:
+            obs["camera_prim"] = self.sensors["front_camera"]
+        return obs
 
     def _get_rewards(self):
         return torch.zeros(1, device=self.device)
@@ -129,46 +156,30 @@ class TekoEnv(DirectRLEnv):
 
     # ------------------------------------------------------------------
     def _reset_idx(self, env_ids):
-        """Tentativa de randomizar pose a cada reset (primeiro via dynamic_control; se não, avisa)."""
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()
 
-        # Amostras aleatórias dentro de 8×8 m
         num_envs = len(env_ids)
-        x = torch.empty(num_envs, device=self.device).uniform_(-4.0, 4.0)
-        y = torch.empty(num_envs, device=self.device).uniform_(-4.0, 4.0)
-        z = torch.full((num_envs,), 0.15, device=self.device)
-
+        x = torch.empty(num_envs, device=self.device).uniform_(-1.4, 1.4)
+        y = torch.empty(num_envs, device=self.device).uniform_(-1.9, 1.9)
+        z = torch.full((num_envs,), 0.43, device=self.device)
         yaw = torch.empty(num_envs, device=self.device).uniform_(-math.pi, math.pi)
         qw = torch.cos(yaw / 2)
         qz = torch.sin(yaw / 2)
-        # quaternions (x,y,z,w) = (0,0,sin/2,cos/2) — aqui vamos precisar (w,x,y,z) para DC
         qx = torch.zeros_like(qw)
         qy = torch.zeros_like(qw)
 
-        # 1) Tenta via dynamic_control (mais compatível com builds antigas)
         try:
             import omni.isaac.dynamic_control as dc
             dci = dc.acquire_dynamic_control_interface()
-            # o root do TEKO é /World/Robot/teko_urdf (geralmente); se for só /World/Robot, dci ainda encontra
-            art = dci.get_articulation("/World/Robot")
-            if art is None:
-                # tenta pelo filho comum do importador URDF
-                art = dci.get_articulation("/World/Robot/teko_urdf")
-            if art is not None:
+            art = dci.get_articulation("/World/Robot") or dci.get_articulation("/World/Robot/teko_urdf")
+            if art:
                 for i in range(num_envs):
                     pose = dc.Transform()
-                    pose.p = dc.Vector3(float(x[i].item()), float(y[i].item()), float(z[i].item()))
-                    # dynamic_control usa quaternion (w, x, y, z)
-                    pose.r = dc.Quaternion(float(qw[i].item()),
-                                           float(qx[i].item()),
-                                           float(qy[i].item()),
-                                           float(qz[i].item()))
+                    pose.p = dc.Vector3(float(x[i]), float(y[i]), float(z[i]))
+                    pose.r = dc.Quaternion(float(qw[i]), float(qx[i]), float(qy[i]), float(qz[i]))
                     dci.set_articulation_root_pose(art, pose)
-                return
             else:
-                print("⚠️ dynamic_control: articulação não encontrada por caminho. Mantendo pose atual.")
+                print("⚠️ dynamic_control: articulação não encontrada.")
         except Exception as e:
-            print(f"⚠️ dynamic_control indisponível p/ reset aleatório: {e}")
-        # 2) Se dynamic_control falhar, mantemos a pose atual (não quebramos o episódio)
-        #    O spawn continuará aleatório no início (via USD).
+            print(f"⚠️ dynamic_control indisponível: {e}")

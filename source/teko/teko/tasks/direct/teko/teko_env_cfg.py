@@ -10,17 +10,18 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-
-from teko.robots.teko import TEKO_CONFIGURATION
+from .robots.teko import TEKO_CONFIGURATION
 
 
 @configclass
 class TekoEnvCfg(DirectRLEnvCfg):
     """Configuration for TEKO robot in a custom arena."""
 
+    # Timing
     decimation = 2
     episode_length_s = 30.0
 
+    # Simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         render_interval=decimation,
@@ -28,16 +29,17 @@ class TekoEnvCfg(DirectRLEnvCfg):
         use_fabric=True,
     )
 
-    robot_cfg: ArticulationCfg = TEKO_CONFIGURATION.replace(
-        prim_path="/World/Robot",
-    )
+    # Robot
+    robot_cfg: ArticulationCfg = TEKO_CONFIGURATION.replace(prim_path="/World/Robot")
 
+    # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=1,
         env_spacing=0.0,
         replicate_physics=True,
     )
 
+    # Joint configuration
     dof_names = [
         "TEKO_Chassi_JointWheelFrontLeft",
         "TEKO_Chassi_JointWheelFrontRight",
@@ -45,10 +47,12 @@ class TekoEnvCfg(DirectRLEnvCfg):
         "TEKO_Chassi_JointWheelBackRight",
     ]
 
+    # Motion control
     action_scale = 1.0
     max_wheel_speed = 6.0
     wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
+    # Spaces (placeholders for RL integration)
     action_space = 2
     observation_space = 1
     state_space = 0
