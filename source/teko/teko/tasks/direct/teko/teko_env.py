@@ -16,7 +16,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .teko_env_cfg import TekoEnvCfg
 from .robots.teko import TEKO_CONFIGURATION
-from .sensors.camera import TekoCamera   # 👈 import da classe que criaste
+from .sensors.camera import TekoCamera
 from pxr import UsdLux
 
 
@@ -36,16 +36,25 @@ class TekoEnv(DirectRLEnv):
         # Instancia a câmera real
         self.camera = TekoCamera(cfg.tiled_camera)
 
+        print("[INFO] Forcing camera render once...")
+        self.camera.update()
+        rgb = self.camera.get_rgb()
+        if rgb is not None:
+            print(f"[DEBUG] Camera frame captured | min={rgb.min()} | max={rgb.max()}")
+        else:
+            print("[WARN] No camera frame yet.")
+
     # -------------------------------------------------------------------- #
     #  Cena e spawn
     # -------------------------------------------------------------------- #
     def _setup_scene(self):
-        """Spawn arena and robot into the USD stage."""
         stage = get_context().get_stage()
         if stage is None:
             raise RuntimeError("USD stage is not initialized")
 
+        # ------------------------------------------------------------------ #
         # Arena
+        # ------------------------------------------------------------------ #
         try:
             arena_path = "/workspace/teko/documents/CAD/USD/stage_arena.usd"
             arena_prim_path = "/World/StageArena"
@@ -53,28 +62,61 @@ class TekoEnv(DirectRLEnv):
             arena_prim = stage.GetPrimAtPath(arena_prim_path)
             arena_prim.GetReferences().AddReference(arena_path)
             UsdGeom.Xformable(arena_prim).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.0))
-            
         except Exception:
             spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        
+
+        # ------------------------------------------------------------------ #
+        # Lights
+        # ------------------------------------------------------------------ #
         dome_path = Sdf.Path("/World/DomeLight")
         dome = UsdLux.DomeLight.Define(stage, dome_path)
-        dome.CreateIntensityAttr(3000.0)                  # intensidade
-        dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))     # cor branca
-        # opcional: exposição em EV (0.0 = sem ajuste). Ajusta se ficar claro/escuro:
-        # dome.CreateExposureAttr(0.0)
-
+        dome.CreateIntensityAttr(3000.0)
+        dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
         print("[INFO] Dome light spawned successfully (USD).")
 
+        sun_path = Sdf.Path("/World/SunLight")
+        sun = UsdLux.DistantLight.Define(stage, sun_path)
+        sun.CreateIntensityAttr(500.0)
+        sun.CreateColorAttr(Gf.Vec3f(1.0, 0.98, 0.9))
+        sun.CreateAngleAttr(0.53)
+        UsdGeom.Xformable(sun).AddRotateXOp().Set(-45.0)
+        UsdGeom.Xformable(sun).AddRotateYOp().Set(30.0)
+        print("[INFO] Sun light spawned successfully (USD).")
 
-        # Robô
+        # ------------------------------------------------------------------ #
+        # Robot
+        # ------------------------------------------------------------------ #
         self.robot = Articulation(TEKO_CONFIGURATION.replace(prim_path="/World/Robot"))
         self.scene.articulations["robot"] = self.robot
-        
-        # Posição inicial e clones
+
+        # ------------------------------------------------------------------ #
+        # Randomize robot pose e clones
+        # ------------------------------------------------------------------ #
         self._usd_randomize_robot_pose()
         self.scene.clone_environments(copy_from_source=False)
 
+        # ------------------------------------------------------------------ #
+        # ✅ Ativa renderização RTX da câmera
+        # ------------------------------------------------------------------ #
+        try:
+            from omni.isaac.core.utils.prims import get_prim_at_path
+            from omni.isaac.sensor import Camera
+
+            cam_prim_path = "/World/Robot/RearCamera"
+            cam_prim = get_prim_at_path(cam_prim_path)
+            if cam_prim.IsValid():
+                camera_sensor = Camera(cam_prim_path, frequency=30)
+                camera_sensor.initialize_rtx()
+                camera_sensor.set_resolution(640, 480)
+                print(f"[INFO] RTX camera initialized at {cam_prim_path}")
+            else:
+                print(f"[WARN] Camera prim not found at {cam_prim_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize RTX camera: {e}")
+
+    # -------------------------------------------------------------------- #
+    #  Randomização de pose
+    # -------------------------------------------------------------------- #
     def _usd_randomize_robot_pose(self):
         """Randomize robot position and yaw inside the arena."""
         stage = get_context().get_stage()
@@ -129,32 +171,24 @@ class TekoEnv(DirectRLEnv):
     # -------------------------------------------------------------------- #
     def _get_observations(self):
         """Return real camera image (RGB) as observation."""
-        # Atualiza buffers da câmera
         self.camera.update()
-
-        # Captura a imagem RGB
         rgb = self.camera.get_rgb()
+
         if rgb is None:
-            # Fallback se ainda não houver frame
             rgb = torch.zeros((1, self.cfg.tiled_camera.height, self.cfg.tiled_camera.width, 3), device=self.device)
 
-        # Transpõe para (B, C, H, W) como o RL espera
-        rgb = rgb.permute(0, 3, 1, 2).float() / 255.0  # normaliza para [0,1]
-
+        rgb = rgb.permute(0, 3, 1, 2).float() / 255.0
         return {"policy": rgb}
 
     def _get_rewards(self):
-        """Reward placeholder (zero)."""
         return torch.zeros(1, device=self.device)
 
     def _get_dones(self):
-        """Reset conditions (always False)."""
         return (
             torch.zeros(1, dtype=torch.bool, device=self.device),
             torch.zeros(1, dtype=torch.bool, device=self.device),
         )
 
     def _reset_idx(self, env_ids):
-        """Reset environment (position robot again)."""
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()

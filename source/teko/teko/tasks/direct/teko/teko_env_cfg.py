@@ -60,7 +60,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # Camera Setup
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
-        prim_path="/World/envs/env_.*/RearCamera",
+        prim_path="/World/Robot/teko_urdf/RearCamera",
         data_types=["rgb"],
         update_period=1.0 / 30.0,  # 30 FPS (≈ Raspberry Pi V2)
         spawn=sim_utils.PinholeCameraCfg(
@@ -70,8 +70,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
             clipping_range=(0.1, 20.0),    
         ),
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(-2.0, 0.0, 1.0),
-            rot=(0.707, 0.0, 0.707, 0.0), # quartenions remember this! 
+            pos=(-0.179, 0.0, 0.0),
+            rot=(0.0, 0.0, 0.0, 1.0), # quartenions remember this! 
             convention="ros",
         ),
         width=640,

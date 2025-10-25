@@ -39,7 +39,7 @@ print("[INFO] Starting camera test...")
 # -----------------------------------------------------------------------------
 # Run a few simulation steps and print RGB shapes
 # -----------------------------------------------------------------------------
-for step_idx in range(10):
+for step_idx in range(200):
     # Zero action (stop motors)
     actions = torch.zeros((1, 2), device=env.device)
 
