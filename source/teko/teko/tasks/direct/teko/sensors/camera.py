@@ -1,54 +1,65 @@
+# Copyright (c) 2022-2025, The TEKO Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
-"""Câmera USD simples acoplada ao robô TEKO (sem depender de CameraCfg)."""
+
+"""
+Camera interface for TEKO environments using tiled rendering.
+This module wraps Isaac Lab's TiledCamera to provide easy access
+to RGB (and optionally depth/segmentation) data from each robot's camera.
+"""
 
 from __future__ import annotations
-from omni.usd import get_context
-from pxr import UsdGeom, Gf, Sdf
 
-def ensure_teko_camera(resolution: tuple[int, int] = (640, 480)) -> str:
-    """
-    Garante uma câmera USD em /World/Robot/TekoCameraMount/TekoCamera.
-    Retorna o caminho prim da câmera.
-    """
-    stage = get_context().get_stage()
-    if stage is None:
-        raise RuntimeError("Stage USD ainda não está disponível.")
+import torch
+from isaaclab.sensors import TiledCamera, TiledCameraCfg
 
-    mount_path = Sdf.Path("/World/Robot/TekoCameraMount")
-    cam_path = Sdf.Path("/World/Robot/TekoCameraMount/TekoCamera")
 
-    # 1) Mount (Xform)
-    if not stage.GetPrimAtPath(mount_path).IsValid():
-        mount_prim = stage.DefinePrim(mount_path, "Xform")
-        UsdGeom.XformCommonAPI(mount_prim).SetTranslate(Gf.Vec3d(0.0, 0.0, 0.15))
-    else:
-        mount_prim = stage.GetPrimAtPath(mount_path)
 
-    # 2) Camera prim
-    if not stage.GetPrimAtPath(cam_path).IsValid():
-        cam_prim = UsdGeom.Camera.Define(stage, cam_path)
-    else:
-        cam_prim = UsdGeom.Camera(stage.GetPrimAtPath(cam_path))
+class TekoCamera:
+    """High-level wrapper around Isaac Lab's TiledCamera for TEKO robots."""
 
-    # 3) Pose (olhando para trás, com pequeno offset)
-    xapi = UsdGeom.XformCommonAPI(cam_prim.GetPrim())
-    xapi.SetRotate(Gf.Vec3f(0.0, 180.0, 0.0), UsdGeom.XformCommonAPI.RotationOrderXYZ)
-    xapi.SetTranslate(Gf.Vec3d(-0.06, 0.0, 0.0))
+    def __init__(self, cfg: TiledCameraCfg):
+        """Initialize the camera sensor using a TiledCameraCfg."""
+        self.cfg = cfg
+        self.tiled_camera = TiledCamera(cfg)
+        #Necessary due to outdate Isaac lab stuff
+        self.tiled_camera._timestamp = 0.0                                                               #1
+        self.tiled_camera._timestamp_last_update = 0.0                                                   #2
+        self.tiled_camera._is_outdated = torch.zeros((1,), dtype=torch.bool, device="cuda")              #3
 
-    # 4) Intrínsecos básicos
-    cam_prim.GetFocalLengthAttr().Set(3.04)
-    cam_prim.GetHorizontalApertureAttr().Set(3.68)
-    cam_prim.GetVerticalApertureAttr().Set(2.76)
-    cam_prim.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
-    cam_prim.GetFocusDistanceAttr().Set(1.0)
-    cam_prim.GetFStopAttr().Set(2.0)
+    def get_rgb(self) -> torch.Tensor:
+        """Return the latest RGB image batch from all environments.
 
-    # 5) Atributo customizado de resolução (tipo correto!)
-    w, h = int(resolution[0]), int(resolution[1])
-    res_attr = cam_prim.GetPrim().GetAttribute("teko:resolution")
-    if not res_attr:
-        res_attr = cam_prim.GetPrim().CreateAttribute("teko:resolution", Sdf.ValueTypeNames.Int2)
-    res_attr.Set(Gf.Vec2i(w, h))
+        Shape: (num_envs, height, width, 3)
+        Dtype: torch.uint8
+        """
+         # Garante que a câmera está atualizada
+        if self.tiled_camera.data.output is None:
+            # força uma atualização inicial caso o buffer ainda não exista
+            self.tiled_camera.update(0.0)
 
-    print(f"📷 Câmera TEKO garantida em {cam_path} (res={w}x{h})")
-    return str(cam_path)
+        data = self.tiled_camera.data.output
+        if data is None or "rgb" not in data:
+            return torch.zeros((1, self.cfg.height, self.cfg.width, 3), dtype=torch.uint8, device="cuda")
+
+        return data["rgb"]
+
+    def get_depth(self) -> torch.Tensor:
+        """Return the latest depth image batch if available."""
+        return self.tiled_camera.data.output.get("depth", None)
+
+    def update(self, dt: float = 0.0):
+        """Update the camera buffers (called once per simulation step)."""
+        self.tiled_camera.update(dt)
+
+    def reset(self):
+        """Reset the internal buffers of the camera."""
+        self.tiled_camera.reset()
+
+    def __repr__(self) -> str:
+        """Readable summary of the camera state."""
+        info = (
+            f"TekoCamera(num_envs={self.tiled_camera.num_cameras}, "
+            f"resolution={self.cfg.width}x{self.cfg.height}, "
+            f"data_types={self.cfg.data_types})"
+        )
+        return info

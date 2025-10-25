@@ -1,7 +1,5 @@
-# Copyright (c) 2022-2025
 # SPDX-License-Identifier: BSD-3-Clause
-
-"""Configuration for the TEKO robot (wheel joints emulate tracks)."""
+"""Configuration for the TEKO robot (wheel joints emulate continuous tracks)."""
 
 from __future__ import annotations
 
@@ -9,19 +7,18 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 
-# Path to the converted USD
+# Path to the TEKO robot USD file (converted from URDF/Fusion)
 TEKO_PATH = "/workspace/teko/documents/CAD/USD/teko.usd"
 
-# Wheel joint names in the USD (prefix TEKO_Chassi_)
-# Convention: [Front-Left, Front-Right, Rear-Left, Rear-Right]
+# Explicit joint names for the 4 wheel joints (used for tracked locomotion)
 WHEEL_JOINTS = [
-    "TEKO_Chassi_JointWheelFrontLeft",   # FL
-    "TEKO_Chassi_JointWheelFrontRight",  # FR
-    "TEKO_Chassi_JointWheelBackLeft",    # RL
-    "TEKO_Chassi_JointWheelBackRight",   # RR
+    "TEKO_Chassi_JointWheelFrontLeft",   # Front-left
+    "TEKO_Chassi_JointWheelFrontRight",  # Front-right
+    "TEKO_Chassi_JointWheelBackLeft",    # Rear-left
+    "TEKO_Chassi_JointWheelBackRight",   # Rear-right
 ]
 
-# Articulation configuration
+# Full Articulation configuration for the TEKO robot
 TEKO_CONFIGURATION = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=TEKO_PATH,
@@ -34,12 +31,11 @@ TEKO_CONFIGURATION = ArticulationCfg(
         joint_pos={joint: 0.0 for joint in WHEEL_JOINTS},
     ),
     actuators={
-        # Implicit actuator — behaves like velocity control when stiffness=0 and damping>0.
         "wheel_acts": ImplicitActuatorCfg(
-            joint_names_expr=WHEEL_JOINTS,   # explicit list, no regex ambiguity
-            effort_limit_sim=6.0,            # Nm per wheel
-            stiffness=0.0,
-            damping=30.0,                    # stable damping for ~6kg robot
+            joint_names_expr=WHEEL_JOINTS,
+            effort_limit_sim=6.0,   # Max torque per joint (Nm)
+            stiffness=0.0,          # No spring force (acts as velocity control)
+            damping=30.0,           # Damping tuned for small tracked robot (~6kg)
         ),
     },
 )

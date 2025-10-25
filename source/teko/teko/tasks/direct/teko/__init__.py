@@ -14,10 +14,10 @@ from . import agents
 
 gym.register(
     id="Template-Teko-Direct-v0",
-    entry_point=f"{__name__}.teko_env:TekoEnv",
+    entry_point="teko.tasks.direct.teko.teko_env:TekoEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.teko_env_cfg:TekoEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "env_cfg_entry_point": "teko.tasks.direct.teko.teko_env_cfg:TekoEnvCfg",
+        "skrl_cfg_entry_point": "teko.tasks.direct.teko.agents:skrl_ppo_cfg.yaml",
     },
 )
