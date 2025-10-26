@@ -1,0 +1,1 @@
+print("✅ Script carregado dentro do Isaac Sim!")

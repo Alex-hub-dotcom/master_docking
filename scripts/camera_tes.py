@@ -1,3 +1,4 @@
+print("\n✅ TEKO camera_tes.py foi iniciado!\n")
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Simple camera test script for the TEKO environment.

@@ -63,12 +63,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
         prim_path="/World/Robot/teko_urdf/RearCamera",
         data_types=["rgb"],
         update_period=1.0 / 30.0,  # 30 FPS (≈ Raspberry Pi V2)
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=3.6,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 20.0),    
-        ),
+        spawn=None,
         offset=TiledCameraCfg.OffsetCfg(
             pos=(-0.179, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0), # quartenions remember this! 
