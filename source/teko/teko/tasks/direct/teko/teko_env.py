@@ -98,21 +98,14 @@ class TekoEnv(DirectRLEnv):
         # ------------------------------------------------------------------ #
         # ✅ Ativa renderização RTX da câmera
         # ------------------------------------------------------------------ #
-        try:
-            from omni.isaac.core.utils.prims import get_prim_at_path
-            from omni.isaac.sensor import Camera
+        # -- Camera (Isaac Lab 0.47.1) --
+        from isaaclab.sensors import TiledCamera
 
-            cam_prim_path = "/World/Robot/RearCamera"
-            cam_prim = get_prim_at_path(cam_prim_path)
-            if cam_prim.IsValid():
-                camera_sensor = Camera(cam_prim_path, frequency=30)
-                camera_sensor.initialize_rtx()
-                camera_sensor.set_resolution(640, 480)
-                print(f"[INFO] RTX camera initialized at {cam_prim_path}")
-            else:
-                print(f"[WARN] Camera prim not found at {cam_prim_path}")
-        except Exception as e:
-            print(f"[ERROR] Failed to initialize RTX camera: {e}")
+        # garante que o prim_path bate com o do cfg
+        print(f"[INFO] Initializing camera at: {self.cfg.tiled_camera.prim_path}")
+        self.camera_sensor = TiledCamera(self.cfg.tiled_camera)
+        self.camera_sensor.initialize()
+        print("[INFO] IsaacLab TiledCamera initialized.")
 
     # -------------------------------------------------------------------- #
     #  Randomização de pose

@@ -70,7 +70,7 @@ class TekoCamera:
         if not data or not hasattr(data, "output"):
             return None
 
-        rgb = data.output.get("rgb")
+        rgb = data.output.get("rgb")                                ####################3 a camera pega a imagem aqui 
         if rgb is None or not isinstance(rgb, torch.Tensor):
             return None
 
