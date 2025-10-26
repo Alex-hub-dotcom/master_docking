@@ -1,37 +1,78 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Environment to simulate the TEKO robot in a static arena, returning RGB observations from Isaac Lab TiledCamera."""
+"""
+TEKO Environment — Isaac Lab 0.47.1
+-----------------------------------
+Simula o robô TEKO num ambiente estático e retorna observações RGB
+a partir de uma câmera já existente no USD (/World/teko_urdf/RearCamera).
+
+Compatível com Gymnasium e skrl.
+"""
 
 from __future__ import annotations
 import random
+from typing import Tuple
 import numpy as np
 import torch
 
+# Omniverse / USD API
 from omni.usd import get_context
 from pxr import Sdf, UsdGeom, Gf, UsdLux
 
+# Isaac Lab / Simulação
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.sensors import TiledCamera
 from isaaclab.sim import SimulationContext
-from isaaclab.sim import utils as sim_utils
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
+# Câmera (API nativa simples)
+from isaacsim.sensors.camera import Camera
+import isaacsim.core.utils.numpy.rotations as rot_utils
+
+# Configurações
 from .teko_env_cfg import TekoEnvCfg
 from .robots.teko import TEKO_CONFIGURATION
 
 
+# --------------------------------------------------------------------------- #
+# Utilitário simples para lidar com rotações
+# --------------------------------------------------------------------------- #
+def _as_quat(rot_any) -> np.ndarray:
+    """Aceita (w,x,y,z) ou (x,y,z,w) ou Euler (graus) e retorna quat (w,x,y,z)."""
+    if rot_any is None:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    arr = np.asarray(rot_any, dtype=np.float32).flatten()
+    if arr.size == 4:
+        if abs(arr[-1]) > abs(arr[0]):  # assume (x,y,z,w)
+            return np.array([arr[3], arr[0], arr[1], arr[2]], dtype=np.float32)
+        return arr
+    elif arr.size == 3:
+        q = rot_utils.euler_angles_to_quats(arr, degrees=True).astype(np.float32)
+        return np.array([q[3], q[0], q[1], q[2]], dtype=np.float32)
+    return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# Ambiente principal
+# --------------------------------------------------------------------------- #
 class TekoEnv(DirectRLEnv):
-    """Single-robot Isaac Lab environment for TEKO using RTX TiledCamera as observation."""
+    """Ambiente RL de um único robô TEKO com observações RGB."""
 
     cfg: TekoEnvCfg
 
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
-        super().__init__(cfg, render_mode, **kwargs)
-        self.actions = torch.zeros((1, 2), device=self.device)
-        self._max_wheel_speed = float(cfg.max_wheel_speed)
+        # define atributos antes do construtor base (pois ele chama _setup_scene)
+        self._cam_res: Tuple[int, int] = (640, 480)
+        self.actions = None
+        self._max_wheel_speed = None
         self.dof_idx = None
-        self.camera_sensor: TiledCamera | None = None
+        self.camera: Camera | None = None
+        
 
+        super().__init__(cfg, render_mode, **kwargs)
+        self._max_wheel_speed = 10.0
+    # ------------------------------------------------------------------ #
+    # Cena e spawn
+    # ------------------------------------------------------------------ #
     def _setup_scene(self):
         stage = get_context().get_stage()
         if stage is None:
@@ -48,101 +89,63 @@ class TekoEnv(DirectRLEnv):
         except Exception:
             spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        # Lighting
-        dome_path = Sdf.Path("/World/DomeLight")
-        dome = UsdLux.DomeLight.Define(stage, dome_path)
+        # Luzes básicas
+        dome = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/DomeLight"))
         dome.CreateIntensityAttr(3000.0)
-        dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
-        print("[INFO] Dome light spawned successfully (USD).")
-
-        sun_path = Sdf.Path("/World/SunLight")
-        sun = UsdLux.DistantLight.Define(stage, sun_path)
+        sun = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/SunLight"))
         sun.CreateIntensityAttr(500.0)
-        sun.CreateColorAttr(Gf.Vec3f(1.0, 0.98, 0.9))
-        sun.CreateAngleAttr(0.53)
         UsdGeom.Xformable(sun).AddRotateXOp().Set(-45.0)
         UsdGeom.Xformable(sun).AddRotateYOp().Set(30.0)
-        print("[INFO] Sun light spawned successfully (USD).")
 
-        spot_path = Sdf.Path("/World/DebugLight")
-        spot = UsdLux.SphereLight.Define(stage, spot_path)
-        spot.CreateIntensityAttr(2000.0)
-        spot.CreateRadiusAttr(0.5)
-        UsdGeom.Xformable(spot).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 1.5))
-        print("[INFO] Debug light spawned above robot (for camera exposure test).")
-
-        # Robot
+        # Robô principal
         self.robot = Articulation(TEKO_CONFIGURATION.replace(prim_path="/World/Robot"))
         self.scene.articulations["robot"] = self.robot
         self._usd_randomize_robot_pose()
         self.scene.clone_environments(copy_from_source=False)
 
         # ------------------------------------------------------------------ #
-        # Camera setup (Isaac Lab 0.47.1 fallback)
+        # Câmera já existente no USD
         # ------------------------------------------------------------------ #
         sim = SimulationContext.instance()
-        stage_sim = sim.stage
-        cam_path = self.cfg.tiled_camera.prim_path
+        cam_path = "/World/teko_urdf/RearCamera"
 
-        # Cria prim se necessário
-        prim = stage_sim.GetPrimAtPath(cam_path)
-        if not prim or not prim.IsValid():
-            print(f"[INFO] Spawning RTX camera prim at {cam_path}")
-            sim_utils.spawn_camera_from_cfg(
-                prim_path=cam_path,
-                cfg=self.cfg.tiled_camera.spawn,
-                translation=self.cfg.tiled_camera.offset.pos,
-                orientation=self.cfg.tiled_camera.offset.rot,
-            )
+        if not sim.stage.GetPrimAtPath(cam_path).IsValid():
+            print(f"[WARN] Camera prim not found at {cam_path}, defining one.")
+            UsdGeom.Camera.Define(sim.stage, Sdf.Path(cam_path))
         else:
-            print(f"[INFO] Existing camera found at {cam_path}")
+            print(f"[INFO] Reusing existing camera at {cam_path}")
 
-        # Instancia o sensor
-        self.camera_sensor = TiledCamera(self.cfg.tiled_camera)
-        self.scene.sensors["rgb_camera"] = self.camera_sensor
+        pos = (0.0, 0.0, 0.0)
+        rot = (0.0, 0.0, 0.0)
+        quat = _as_quat(rot)
+        quat_xyzw = np.array([quat[1], quat[2], quat[3], quat[0]], dtype=np.float32)
 
-        # Inicializa manualmente (API interna)
-        if not hasattr(self.camera_sensor, "_is_outdated"):
-            print("[INFO] Forcing internal initialization of TiledCamera buffers.")
-            try:
-                self.camera_sensor._initialize()  # método privado em 0.47.1
-            except Exception as e:
-                print(f"[WARN] Internal _initialize() failed: {e}")
+        self.camera = Camera(
+            prim_path=cam_path,
+            position=np.array(pos, dtype=np.float32),
+            orientation=quat_xyzw,
+            resolution=self._cam_res,
+            frequency=30,
+        )
+        self.camera.initialize()
 
-        # Warm-up de render
-        print("[INFO] Performing warm-up renders...")
-        from omni.kit.viewport.utility import get_active_viewport_window
-
-        try:
-            vp_win = get_active_viewport_window()
-            if vp_win:
-                vp = vp_win.viewport_api
-                vp.set_texture_resolution((self.cfg.tiled_camera.width, self.cfg.tiled_camera.height))
-                vp.set_active_camera(self.cfg.tiled_camera.prim_path)
-                vp.set_render_mode("PathTracing")
-                vp.set_post_process_option("EnableAutoExposure", True)
-                vp.set_post_process_option("EnableRayTracedAmbientOcclusion", True)
-                vp.set_post_process_option("EnableReflections", True)
-                print("[INFO] RTX PathTracing enabled with auto-exposure.")
-            else:
-                print("[WARN] No active viewport window found.")
-        except Exception as e:
-            print(f"[WARN] Could not enable RTX rendering: {e}")
+        # render inicial
         for _ in range(3):
-            sim.render()
             sim.step(render=True)
 
-        # Teste do feed RGB
         try:
-            data = self.camera_sensor.data.output.get("rgb", None)
-            if data is not None and np.any(data):
-                print(f"[INFO] RGB feed active | shape={data.shape} | min={data.min():.3f} | max={data.max():.3f}")
+            rgba = self.camera.get_rgba()
+            if isinstance(rgba, np.ndarray) and rgba.size > 0:
+                mn, mx = int(rgba[..., :3].min()), int(rgba[..., :3].max())
+                print(f"[INFO] Camera RGBA ready | shape={rgba.shape} | min={mn} | max={mx}")
             else:
-                print("[WARN] RGB feed still zero — check lighting or exposure.")
+                print("[WARN] Camera returned empty buffer on first check.")
         except Exception as e:
-            print(f"[WARN] Could not read RGB buffer: {e}")
+            print(f"[WARN] Camera first read failed: {e}")
 
-
+    # ------------------------------------------------------------------ #
+    # Pose aleatória do robô
+    # ------------------------------------------------------------------ #
     def _usd_randomize_robot_pose(self):
         stage = get_context().get_stage()
         robot_prim = stage.GetPrimAtPath("/World/Robot")
@@ -151,19 +154,24 @@ class TekoEnv(DirectRLEnv):
         x = random.uniform(-1.4, 1.4)
         y = random.uniform(-1.9, 1.9)
         z = 0.43
-        yaw_deg = random.uniform(-180.0, 180.0)
+        yaw = random.uniform(-180.0, 180.0)
         xf = UsdGeom.Xformable(robot_prim)
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
-        xf.AddRotateZOp().Set(yaw_deg)
+        xf.AddRotateZOp().Set(yaw)
 
+    # ------------------------------------------------------------------ #
+    # Controle do robô
+    # ------------------------------------------------------------------ #
     def _lazy_init_articulation(self):
         if self.dof_idx is not None or getattr(self.robot, "root_physx_view", None) is None:
             return
-        joint_names = list(self.robot.joint_names)
-        name_to_idx = {n: i for i, n in enumerate(joint_names)}
-        dof_list = [name_to_idx[n] for n in self.cfg.dof_names if n in name_to_idx]
-        self.dof_idx = torch.tensor(dof_list, dtype=torch.long, device=self.device)
+        name_to_idx = {n: i for i, n in enumerate(self.robot.joint_names)}
+        self.dof_idx = torch.tensor(
+            [name_to_idx[n] for n in self.cfg.dof_names if n in name_to_idx],
+            dtype=torch.long,
+            device=self.device,
+        )
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions = actions
@@ -176,37 +184,27 @@ class TekoEnv(DirectRLEnv):
         targets = torch.tensor([left, right, left, right], device=self.device).unsqueeze(0) * self._max_wheel_speed
         polarity = torch.tensor(self.cfg.wheel_polarity, device=self.device).unsqueeze(0)
         self.robot.set_joint_velocity_target(
-            targets * polarity,
-            env_ids=torch.tensor([0], device=self.device),
-            joint_ids=self.dof_idx,
+            targets * polarity, env_ids=torch.tensor([0], device=self.device), joint_ids=self.dof_idx
         )
 
+    # ------------------------------------------------------------------ #
+    # Observações e recompensas
+    # ------------------------------------------------------------------ #
     def _get_observations(self):
-        data = None
-        if self.camera_sensor is not None:
-            data = self.camera_sensor.data.output.get("rgb", None)
+        """Retorna imagem RGB da câmera como tensor normalizado [0,1]."""
+        if self.camera is None:
+            h, w = self._cam_res[1], self._cam_res[0]
+            rgb = torch.zeros((1, 3, h, w), device=self.device, dtype=torch.float32)
+            return {"policy": rgb}
 
-        if data is None:
-            rgb = torch.zeros(
-                (1, self.cfg.tiled_camera.height, self.cfg.tiled_camera.width, 3),
-                device=self.device,
-                dtype=torch.uint8,
-            )
-        else:
-            if isinstance(data, np.ndarray):
-                rgb = torch.from_numpy(data)
-            else:
-                rgb = data
-            rgb = rgb.to(self.device)
-            if rgb.ndim == 3:
-                rgb = rgb.unsqueeze(0)
-            if rgb.dtype != torch.uint8:
-                if rgb.dtype.is_floating_point:
-                    rgb = (rgb.clamp(0, 1) * 255.0).to(torch.uint8)
-                else:
-                    rgb = rgb.to(torch.uint8)
+        rgba = self.camera.get_rgba()
+        if not isinstance(rgba, np.ndarray) or rgba.size == 0:
+            h, w = self._cam_res[1], self._cam_res[0]
+            rgb = torch.zeros((1, 3, h, w), device=self.device, dtype=torch.float32)
+            return {"policy": rgb}
 
-        rgb = rgb.permute(0, 3, 1, 2).float() / 255.0
+        rgb_np = rgba[..., :3]
+        rgb = torch.from_numpy(rgb_np).to(self.device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         return {"policy": rgb}
 
     def _get_rewards(self):

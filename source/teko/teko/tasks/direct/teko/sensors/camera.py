@@ -1,83 +1,62 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Camera sensor wrapper for the TEKO robot (Isaac Lab 0.47.1 compatible, usando câmera existente no USD).
+Simple camera wrapper for the TEKO robot using isaacsim.sensors.camera.Camera
+(compatible with Isaac Sim 5.0 / Isaac Lab 0.47.1).
 """
 
 from __future__ import annotations
-import torch
-import time
-
-from isaaclab.sensors import TiledCamera as BaseTiledCamera, TiledCameraCfg
-from isaacsim.core.utils.prims import get_prim_at_path  # ✅ versão correta para 0.47.1
-
-
-class PatchedTiledCamera(BaseTiledCamera):
-    """Versão corrigida da TiledCamera que garante que self.cfg existe."""
-
-    def __init__(self, cfg: TiledCameraCfg):
-        self.cfg = cfg
-        try:
-            super().__init__(cfg)
-        except AttributeError:
-            pass
+import numpy as np
+import isaacsim.core.utils.numpy.rotations as rot_utils
+from isaacsim.sensors.camera import Camera
 
 
 class TekoCamera:
-    """Wrapper seguro e compatível para uma TiledCamera do Isaac Lab."""
+    """Safe wrapper around isaacsim.sensors.camera.Camera."""
 
-    def __init__(self, cfg: TiledCameraCfg):
-        """Inicializa e anexa a câmera definida no config."""
-        self.cfg = cfg
+    def __init__(
+        self,
+        prim_path: str = "/World/Robot/RearCamera",
+        position=(0.0, 0.0, 0.6),
+        rotation=(0.0, 0.0, 0.0),  # Euler degrees
+        resolution=(640, 480),
+        frequency_hz: int = 30,
+    ):
+        self.prim_path = prim_path
+        self.position = np.array(position, dtype=np.float32)
+        self.rotation = np.array(rotation, dtype=np.float32)
+        self.resolution = resolution
+        self.frequency_hz = frequency_hz
 
-        # --- Evita recriação se a câmera já existe no USD ---
-        prim = get_prim_at_path(cfg.prim_path)
-        if prim and prim.IsValid():
-            cfg.spawn = None  # impede o TiledCamera de tentar criar novamente
+        # Converte Euler → quat (x, y, z, w)
+        quat_xyzw = rot_utils.euler_angles_to_quats(self.rotation, degrees=True)
 
-        # Cria o objeto de câmera patchado
-        self._camera = PatchedTiledCamera(cfg)
+        # Cria e inicializa a câmera
+        self._camera = Camera(
+            prim_path=self.prim_path,
+            position=self.position,
+            orientation=quat_xyzw,
+            resolution=self.resolution,
+            frequency=self.frequency_hz,
+        )
+        self._camera.initialize()
 
-        # Força inicialização de campos internos se faltarem
-        defaults = {
-            "_timestamp": 0.0,
-            "_timestamp_last_update": 0.0,
-            "_is_outdated": False,
-            "_enabled": True,
-            "_usd_sensor_prim": None,
-            "_sensor_interface": None,
-            "_last_render_time": time.time(),
-        }
-        for key, val in defaults.items():
-            if not hasattr(self._camera, key):
-                setattr(self._camera, key, val)
+        print(f"[INFO] Camera created at {self.prim_path} | res={self.resolution} | freq={self.frequency_hz} Hz")
 
-        print(f"[INFO] Camera initialized at prim: {cfg.prim_path}")
-        print(f"[INFO] Resolution: {cfg.width}x{cfg.height}")
-        print(f"[INFO] Data types: {cfg.data_types}")
+    # ------------------------------------------------------------------ #
+    def get_rgba(self) -> np.ndarray:
+        """Returns the full RGBA frame as uint8 numpy array (H, W, 4)."""
+        return self._camera.get_rgba()
 
-    def update(self, dt: float = 1.0 / 60.0):
-        """Atualiza o sensor da câmera (compatível com builds incompletas)."""
-        try:
-            self._camera.update(dt)
-        except AttributeError:
-            if not hasattr(self._camera, "_timestamp"):
-                self._camera._timestamp = 0.0
-            self._camera._timestamp += dt
+    def get_rgb(self) -> np.ndarray:
+        """Returns only the RGB channels (H, W, 3)."""
+        rgba = self._camera.get_rgba()
+        if isinstance(rgba, np.ndarray) and rgba.shape[-1] == 4:
+            return rgba[..., :3]
+        return rgba
 
-    def get_rgb(self) -> torch.Tensor | None:
-        """Obtém o frame RGB da câmera."""
-        data = getattr(self._camera, "data", None)
-        if not data or not hasattr(data, "output"):
-            return None
-
-        rgb = data.output.get("rgb")                                ####################3 a camera pega a imagem aqui 
-        if rgb is None or not isinstance(rgb, torch.Tensor):
-            return None
-
-        return rgb
+    def capture_frame(self) -> np.ndarray:
+        """Alias for get_rgb(), for quick one-off captures."""
+        return self.get_rgb()
 
     def __repr__(self):
-        return (
-            f"<TekoCamera prim={self.cfg.prim_path} "
-            f"res={self.cfg.width}x{self.cfg.height}>"
-        )
+        return f"<TekoCamera prim={self.prim_path}, res={self.resolution}, freq={self.frequency_hz} Hz>"
