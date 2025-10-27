@@ -2,87 +2,79 @@
 """
 TEKO Environment — Isaac Lab 0.47.1
 -----------------------------------
-Single-robot environment for TEKO, using an RGB pinhole camera
-configured to emulate the Raspberry Pi Camera V2 (Sony IMX219).
-
-Compatible with Gymnasium and skrl.
+Single-robot environment for TEKO with:
+ - RGB pinhole camera (Raspberry Pi V2 emulation)
+ - RTX LiDAR prim preconfigured in the USD: /World/teko_urdf/Lidar
 """
 
 from __future__ import annotations
 import random
-from typing import Tuple
 import numpy as np
 import torch
+from typing import Tuple
 
-# Omniverse / USD API
+# Omniverse / USD
 from omni.usd import get_context
-from pxr import Sdf, UsdGeom, Gf, UsdLux
+from pxr import Sdf, Usd, UsdGeom, UsdLux, Gf
 
-# Isaac Lab / Simulation
+# Isaac Lab
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim import SimulationContext
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
-# Isaac Sim Camera API
+# Sensors
 from isaacsim.sensors.camera import Camera
+from isaacsim.sensors.rtx import LidarRtx
 import isaacsim.core.utils.numpy.rotations as rot_utils
 
-# Config
+# TEKO config
 from .teko_env_cfg import TekoEnvCfg
 from .robots.teko import TEKO_CONFIGURATION
 
 
-
-# Quaternion utility
-
+# ---------------------------------------------------------------------
+# Utils
+# ---------------------------------------------------------------------
 def _as_quat(rot_any) -> np.ndarray:
-    """Converts Euler or quaternion tuples to (w, x, y, z) format."""
+    """Convert Euler (°) or quaternion tuples to (w, x, y, z)."""
     if rot_any is None:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     arr = np.asarray(rot_any, dtype=np.float32).flatten()
     if arr.size == 4:
-        if abs(arr[-1]) > abs(arr[0]):  # assumes (x, y, z, w)
-            return np.array([arr[3], arr[0], arr[1], arr[2]], dtype=np.float32)
-        return arr
-    elif arr.size == 3:
+        return arr if abs(arr[0]) > abs(arr[-1]) else np.array([arr[3], arr[0], arr[1], arr[2]], dtype=np.float32)
+    if arr.size == 3:
         q = rot_utils.euler_angles_to_quats(arr, degrees=True).astype(np.float32)
         return np.array([q[3], q[0], q[1], q[2]], dtype=np.float32)
     return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
-
-# Main environment
-
+# ---------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------
 class TekoEnv(DirectRLEnv):
-    """Single-robot RL environment with RGB camera observations."""
+    """Single-robot RL environment with RGB camera and RTX LiDAR."""
 
     cfg: TekoEnvCfg
 
-    
-    # Initialization
-    
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
-        """Initialize environment and default parameters."""
         self._cam_res: Tuple[int, int] = (cfg.camera.width, cfg.camera.height)
         self.actions = None
-        self._max_wheel_speed = None
+        self._max_wheel_speed = 10.0
         self.dof_idx = None
         self.camera: Camera | None = None
-
+        self.lidar: LidarRtx | None = None
         super().__init__(cfg, render_mode, **kwargs)
-        self._max_wheel_speed = 10.0
 
-    
+    # -----------------------------------------------------------------
     # Scene setup
-    
+    # -----------------------------------------------------------------
     def _setup_scene(self):
-        """Load arena, lights, robot, and connect the existing camera."""
         stage = get_context().get_stage()
         if stage is None:
-            raise RuntimeError("USD stage is not initialized")
+            raise RuntimeError("USD stage not initialized")
 
-        # Load arena or fallback to ground plane
+        # Arena / ground
         try:
             arena_path = "/workspace/teko/documents/CAD/USD/stage_arena.usd"
             arena_prim_path = "/World/StageArena"
@@ -93,32 +85,31 @@ class TekoEnv(DirectRLEnv):
         except Exception:
             spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        # Basic lighting
+        # Lighting
         dome = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/DomeLight"))
         dome.CreateIntensityAttr(3000.0)
         sun = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/SunLight"))
         sun.CreateIntensityAttr(500.0)
-        UsdGeom.Xformable(sun).AddRotateXOp().Set(-45.0)
-        UsdGeom.Xformable(sun).AddRotateYOp().Set(30.0)
+        sun_xf = UsdGeom.Xformable(sun)
+        sun_xf.AddRotateXOp().Set(-45.0)
+        sun_xf.AddRotateYOp().Set(30.0)
 
-        # Robot articulation
+        # Robot
         self.robot = Articulation(TEKO_CONFIGURATION.replace(prim_path="/World/Robot"))
         self.scene.articulations["robot"] = self.robot
         self._usd_randomize_robot_pose()
         self.scene.clone_environments(copy_from_source=False)
 
-        
-        # Existing camera (keep pose, apply Pi V2 optical model)
-        
+        # -----------------------------------------------------------------
+        # Camera (USD predefinida)
+        # -----------------------------------------------------------------
         sim = SimulationContext.instance()
         cam_path = self.cfg.camera.prim_path
         prim = sim.stage.GetPrimAtPath(cam_path)
-
         if not prim.IsValid():
             raise RuntimeError(f"[ERROR] Camera prim not found at {cam_path}")
-        print(f"[INFO] Reusing existing camera at {cam_path}")
+        print(f"[INFO] Using existing camera at {cam_path}")
 
-        # Wrap camera without changing pose
         self.camera = Camera(
             prim_path=cam_path,
             resolution=self._cam_res,
@@ -126,57 +117,49 @@ class TekoEnv(DirectRLEnv):
         )
         self.camera.initialize()
 
-        # Raspberry Pi Camera V2 optical parameters (RGB pinhole)
         try:
             usd_cam = UsdGeom.Camera(prim)
-            usd_cam.CreateFocalLengthAttr(3.04)            # mm
-            usd_cam.CreateHorizontalApertureAttr(4.6)      # mm
-            usd_cam.CreateVerticalApertureAttr(2.76)       # mm
-            usd_cam.CreateFStopAttr(32.0)                  # disable DOF blur
-            usd_cam.CreateFocusDistanceAttr(10.0)          # focus to infinity
+            usd_cam.CreateFocalLengthAttr(3.04)
+            usd_cam.CreateHorizontalApertureAttr(4.6)
+            usd_cam.CreateVerticalApertureAttr(2.76)
+            usd_cam.CreateFStopAttr(32.0)
+            usd_cam.CreateFocusDistanceAttr(10.0)
             usd_cam.CreateClippingRangeAttr(Gf.Vec2f(0.01, 100.0))
             print("[INFO] RearCamera set to Raspberry Pi V2 pinhole model.")
         except Exception as e:
             print(f"[WARN] Could not apply camera optics: {e}")
 
-        # Initial render sync
-        for _ in range(3):
-            sim.step(render=True)
+        # -----------------------------------------------------------------
+        # LiDAR RTX — já presente no USD
+        # -----------------------------------------------------------------
+        lidar_prim_path = "/World/Robot/teko_urdf/TEKO_Body/LidarMount/Lidar"
+        if not stage.GetPrimAtPath(lidar_prim_path):
+            print(f"[ERROR] LiDAR prim not found at {lidar_prim_path}")
+            self.lidar = None
+        else:
+            self.lidar = LidarRtx(lidar_prim_path)
+            self.lidar.initialize()
+            print(f"[INFO] RTX LiDAR found and initialized at {lidar_prim_path}")
 
-        # Validate camera output
-        try:
-            rgba = self.camera.get_rgba()
-            if isinstance(rgba, np.ndarray) and rgba.size > 0:
-                mn, mx = int(rgba[..., :3].min()), int(rgba[..., :3].max())
-                print(f"[INFO] Camera RGBA ready | shape={rgba.shape} | min={mn} | max={mx}")
-            else:
-                print("[WARN] Camera returned empty buffer.")
-        except Exception as e:
-            print(f"[WARN] Camera read failed: {e}")
-
-    
-    # Randomize robot pose
-    
+    # -----------------------------------------------------------------
+    # Utilities
+    # -----------------------------------------------------------------
     def _usd_randomize_robot_pose(self):
-        """Randomize robot position and yaw inside the arena."""
         stage = get_context().get_stage()
         robot_prim = stage.GetPrimAtPath("/World/Robot")
         if not robot_prim:
             return
-        x = random.uniform(-1.4, 1.4)
-        y = random.uniform(-1.9, 1.9)
-        z = 0.43
+        x, y, z = random.uniform(-1.4, 1.4), random.uniform(-1.9, 1.9), 0.43
         yaw = random.uniform(-180.0, 180.0)
         xf = UsdGeom.Xformable(robot_prim)
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
         xf.AddRotateZOp().Set(yaw)
 
-    
-    # Robot control
-    
+    # -----------------------------------------------------------------
+    # Control
+    # -----------------------------------------------------------------
     def _lazy_init_articulation(self):
-        """Initialize joint indices once."""
         if self.dof_idx is not None or getattr(self.robot, "root_physx_view", None) is None:
             return
         name_to_idx = {n: i for i, n in enumerate(self.robot.joint_names)}
@@ -187,53 +170,68 @@ class TekoEnv(DirectRLEnv):
         )
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        """Store actions before physics update."""
         self.actions = actions
         self._lazy_init_articulation()
 
     def _apply_action(self):
-        """Convert normalized actions into wheel velocity targets."""
         if self.dof_idx is None:
             return
         left, right = self.actions[0]
         targets = torch.tensor([left, right, left, right], device=self.device).unsqueeze(0) * self._max_wheel_speed
         polarity = torch.tensor(self.cfg.wheel_polarity, device=self.device).unsqueeze(0)
         self.robot.set_joint_velocity_target(
-            targets * polarity, env_ids=torch.tensor([0], device=self.device), joint_ids=self.dof_idx
+            targets * polarity,
+            env_ids=torch.tensor([0], device=self.device),
+            joint_ids=self.dof_idx,
         )
 
-    
-    # Observations and rewards
-    
+    # -----------------------------------------------------------------
+    # Observations
+    # -----------------------------------------------------------------
     def _get_observations(self):
-        """Return normalized [0,1] RGB tensor from the camera."""
-        if self.camera is None:
+        obs = {}
+
+        # RGB
+        try:
+            rgba = self.camera.get_rgba()
+            if isinstance(rgba, np.ndarray) and rgba.size > 0:
+                rgb = torch.from_numpy(rgba[..., :3]).to(self.device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+                obs["rgb"] = rgb
+            else:
+                h, w = self._cam_res[1], self._cam_res[0]
+                obs["rgb"] = torch.zeros((1, 3, h, w), device=self.device)
+        except Exception:
             h, w = self._cam_res[1], self._cam_res[0]
-            rgb = torch.zeros((1, 3, h, w), device=self.device, dtype=torch.float32)
-            return {"policy": rgb}
+            obs["rgb"] = torch.zeros((1, 3, h, w), device=self.device)
 
-        rgba = self.camera.get_rgba()
-        if not isinstance(rgba, np.ndarray) or rgba.size == 0:
-            h, w = self._cam_res[1], self._cam_res[0]
-            rgb = torch.zeros((1, 3, h, w), device=self.device, dtype=torch.float32)
-            return {"policy": rgb}
+        # LiDAR
+        try:
+            if self.lidar is None:
+                obs["lidar"] = torch.zeros((1, 3), device=self.device)
+            else:
+                data = self.lidar.get_point_cloud_data()
+                pts = data.get("points") if data and "points" in data else None
+                if pts is None:
+                    obs["lidar"] = torch.zeros((1, 3), device=self.device)
+                else:
+                    obs["lidar"] = torch.from_numpy(pts).float().to(self.device)
+        except Exception as e:
+            print(f"[WARN] LiDAR read failed: {e}")
+            obs["lidar"] = torch.zeros((1, 3), device=self.device)
+        return obs
 
-        rgb_np = rgba[..., :3]
-        rgb = torch.from_numpy(rgb_np).to(self.device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-        return {"policy": rgb}
-
+    # -----------------------------------------------------------------
+    # RL placeholders
+    # -----------------------------------------------------------------
     def _get_rewards(self):
-        """Return zero reward (placeholder for RL)."""
         return torch.zeros(1, device=self.device)
 
     def _get_dones(self):
-        """Return episode termination flags (placeholder for RL)."""
         return (
             torch.zeros(1, dtype=torch.bool, device=self.device),
             torch.zeros(1, dtype=torch.bool, device=self.device),
         )
 
     def _reset_idx(self, env_ids):
-        """Reset environment and reinitialize articulations."""
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()
