@@ -74,7 +74,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # --- Goal robot configuration -------------------------------------
     class GoalCfg:
-        usd_path = "/workspace/teko/documents/CAD/USD/teko.usd"
+        usd_path = "/workspace/teko/documents/CAD/USD/teko_goal.usd"
         prim_path = "/World/RobotGoal"
         aruco_texture = "/workspace/teko/documents/Aruco/4x4_1000-1.png"
         position = (1.0, 0.0, 0.0)
