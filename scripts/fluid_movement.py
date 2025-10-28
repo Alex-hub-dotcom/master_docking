@@ -4,7 +4,7 @@ Fluid movement test for TEKO robot.
 ------------------------------------
 Drives the robot forward while applying a slight angular difference
 between left and right wheels to create a smooth circular trajectory.
-Now compatible with Isaac Lab 0.47.1 and TekoEnv (camera + LiDAR).
+Now compatible with Isaac Lab 0.47.1 and TekoEnv (camera only).
 """
 
 from isaaclab.app import AppLauncher
@@ -17,6 +17,7 @@ LINEAR_SPEED = 1.2          # Forward linear velocity (m/s equivalent)
 ANGULAR_FACTOR = 0.7        # <1.0 = turn left, >1.0 = turn right
 DURATION = 50.0             # Total runtime (seconds)
 STEP_HZ = 30                # Simulation step frequency
+
 
 def main(headless=False):
     # ------------------------------------------------------------------
@@ -60,8 +61,7 @@ def main(headless=False):
             if step % STEP_HZ == 0:
                 obs = env._get_observations()
                 rgb_ok = "rgb" in obs and obs["rgb"].sum() > 0
-                lidar_ok = "lidar" in obs and obs["lidar"].sum() > 0
-                print(f"Step {step:03d} | RGB={rgb_ok} | LiDAR={lidar_ok} | Time={time.time()-t0:.1f}s")
+                print(f"Step {step:03d} | RGB={rgb_ok} | Time={time.time()-t0:.1f}s")
 
             step += 1
     except KeyboardInterrupt:
@@ -73,3 +73,8 @@ def main(headless=False):
 
 if __name__ == "__main__":
     main(headless=False)
+
+
+
+    
+#/workspace/isaaclab/_isaac_sim/python.sh scripts/fluid_movement.py

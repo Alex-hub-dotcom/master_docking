@@ -1,111 +1,90 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment Configuration
-------------------------------
-Configuration container for the single-robot TEKO environment.
-
-Compatible with Isaac Lab 0.47.1 and DirectRLEnv.
+TekoEnvCfg — environment configuration for TEKO with RGB camera.
+Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
 """
 
 from __future__ import annotations
 
-# Isaac Lab imports
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
-# TEKO robot configuration
 from .robots.teko import TEKO_CONFIGURATION
 
 
 @configclass
 class TekoEnvCfg(DirectRLEnvCfg):
-    """Configuration for the TEKO single-robot environment."""
+    """Configuration for TEKO environment (one active robot + static RobotGoal)."""
 
-    # ------------------------------------------------------------------
-    # 1. Timing and simulation parameters
-    # ------------------------------------------------------------------
-    decimation = 2                      # Number of physics steps per env step
-    episode_length_s = 30.0             # Maximum episode duration (s)
+    # --- General parameters -------------------------------------------
+    decimation = 2
+    episode_length_s = 30.0
 
+    # --- Simulation ---------------------------------------------------
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 120,                     # Physics timestep (s)
-        render_interval=decimation,     # Render every N physics steps
-        gravity=(0.0, 0.0, -9.81),      # Standard gravity
-        use_fabric=True,                # Enable PhysX fabric solver
+        dt=1 / 120,
+        render_interval=decimation,
+        gravity=(0.0, 0.0, -9.81),
+        use_fabric=True,
     )
 
-    # ------------------------------------------------------------------
-    # 2. Robot configuration
-    # ------------------------------------------------------------------
+    # --- Active robot -------------------------------------------------
     robot_cfg: ArticulationCfg = TEKO_CONFIGURATION.replace(
         prim_path="/World/Robot"
     )
 
-    # ------------------------------------------------------------------
-    # 3. Scene configuration
-    # ------------------------------------------------------------------
+    # --- Scene configuration ------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,                     # Number of parallel environments
-        env_spacing=0.0,                # Distance between environments
-        replicate_physics=True,         # Shared physics context
+        num_envs=1,
+        env_spacing=0.0,
+        replicate_physics=True,
     )
 
-    # ------------------------------------------------------------------
-    # 4. Control parameters
-    # ------------------------------------------------------------------
-    dof_names = [                       # Motorized wheel joint names
+    # --- Degrees of freedom -------------------------------------------
+    dof_names = [
         "TEKO_Chassi_JointWheelFrontLeft",
         "TEKO_Chassi_JointWheelFrontRight",
         "TEKO_Chassi_JointWheelBackLeft",
         "TEKO_Chassi_JointWheelBackRight",
     ]
 
-    action_scale = 1.0                  # Scale factor for normalized actions
-    max_wheel_speed = 6.0               # Max wheel angular velocity (rad/s)
-    wheel_polarity = [1.0, -1.0, 1.0, -1.0]  # Direction convention per wheel
+    # --- Action configuration -----------------------------------------
+    action_scale = 1.0
+    max_wheel_speed = 6.0
+    wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
-    # ------------------------------------------------------------------
-    # 5. Camera metadata
-    # ------------------------------------------------------------------
+    # --- Camera configuration -----------------------------------------
     class CameraCfg:
-        """Metadata for the pre-defined RearCamera prim."""
-        prim_path = "/World/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera"
-        width = 640                     # Image width (px)
-        height = 480                    # Image height (px)
-        frequency_hz = 30               # Capture frequency (Hz)
-        # Optical parameters — Raspberry Pi Camera V2 (Sony IMX219)
-        focal_length = 3.04             # mm
-        horiz_aperture = 4.6            # mm
-        vert_aperture = 2.76            # mm
-        f_stop = 32.0                   # Disable depth-of-field blur
-        focus_distance = 10.0           # Focus to infinity
+        prim_path = (
+            "/World/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera"
+        )
+        width = 640
+        height = 480
+        frequency_hz = 30
+        focal_length = 3.04
+        horiz_aperture = 4.6
+        vert_aperture = 2.76
+        f_stop = 32.0
+        focus_distance = 10.0
 
-    camera = CameraCfg()                # Instantiate camera metadata
+    camera = CameraCfg()
 
-    # ------------------------------------------------------------------
-    # 6. LiDAR metadata (RTX virtual LiDAR)
-    # ------------------------------------------------------------------
-    class LidarCfg:
-        """Metadata for the RTX LiDAR sensor (already in USD)."""
-        prim_path = "/World/Robot/teko_urdf/TEKO_Body/LidarMount/Lidar"
-        horizontal_fov = 360.0
-        vertical_fov = 30.0
-        horizontal_resolution = 1024
-        vertical_resolution = 32
-        max_distance = 20.0
-        rotation_rate_hz = 10.0
+    # --- Goal robot configuration -------------------------------------
+    class GoalCfg:
+        usd_path = "/workspace/teko/documents/CAD/USD/teko.usd"
+        prim_path = "/World/RobotGoal"
+        aruco_texture = "/workspace/teko/documents/Aruco/4x4_1000-1.png"
+        position = (1.0, 0.0, 0.0)
+        aruco_offset = (0.1675, 0.0, -0.025)
+        aruco_size = 0.05
 
-    lidar = LidarCfg()                  # Instantiate LiDAR metadata
+    goal = GoalCfg()
 
-    # ------------------------------------------------------------------
-    # 7. Observation / action space (Isaac Lab compatible)
-    # ------------------------------------------------------------------
-    action_space = (2,)                 # Two continuous control inputs (L/R)
-
-    observation_space = {               # Dictionary of observation dimensions
-        "rgb": (3, 480, 640),           # RGB image (C, H, W)
-        "lidar": (360, 3),              # LiDAR point cloud (N×3)
+    # --- Observation and action spaces --------------------------------
+    action_space = (2,)
+    observation_space = {
+        "rgb": (3, 480, 640),
     }
