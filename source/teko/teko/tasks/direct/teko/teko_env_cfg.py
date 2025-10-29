@@ -64,11 +64,12 @@ class TekoEnvCfg(DirectRLEnvCfg):
         width = 640
         height = 480
         frequency_hz = 30
-        focal_length = 3.04
-        horiz_aperture = 4.6
-        vert_aperture = 2.76
+        focal_length = 3.6
+        horiz_aperture = 4.8
+        vert_aperture = 3.6
         f_stop = 32.0
         focus_distance = 10.0
+
 
     camera = CameraCfg()
 

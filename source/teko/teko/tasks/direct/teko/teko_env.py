@@ -82,6 +82,7 @@ class TekoEnv(DirectRLEnv):
         xf_robot.AddTranslateOp().Set(Gf.Vec3d(-0.3, 0.0, 0.43))
         xf_robot.AddRotateZOp().Set(180.0)
 
+
         # --- Robô alvo estático ---
         TEKO_USD_PATH = "/workspace/teko/documents/CAD/USD/teko_goal.usd"
         ARUCO_IMG_PATH = "/workspace/teko/documents/Aruco/test_marker.png"
@@ -94,24 +95,26 @@ class TekoEnv(DirectRLEnv):
         xf_goal.AddRotateZOp().Set(180.0)
 
         # --- Placa ArUco ---
-        size = 0.25
+        size = 0.22
         half = size * 0.5
         ARUCO_PRIM_PATH = f"{ROBOT_GOAL_PATH}/Aruco"
 
         mesh = UsdGeom.Mesh.Define(stage, ARUCO_PRIM_PATH)
         mesh.CreatePointsAttr([
-            Gf.Vec3f(0.0, -half, -half),
-            Gf.Vec3f(0.0,  half, -half),
-            Gf.Vec3f(0.0,  half,  half),
-            Gf.Vec3f(0.0, -half,  half),
+            Gf.Vec3f(0.0, -half, -half),  # canto inferior esquerdo
+            Gf.Vec3f(0.0,  half, -half),  # canto inferior direito
+            Gf.Vec3f(0.0,  half,  half),  # canto superior direito
+            Gf.Vec3f(0.0, -half,  half),  # canto superior esquerdo
         ])
+
+
         mesh.CreateFaceVertexCountsAttr([3, 3])
         mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 0, 2, 3])
         mesh.CreateDoubleSidedAttr(True)
 
         xf_aruco = UsdGeom.Xformable(mesh)
         xf_aruco.AddTranslateOp().Set(Gf.Vec3f(0.28, 0.0, -0.045))
-        xf_aruco.AddRotateZOp().Set(180.0)
+       
 
         primvars_api = UsdGeom.PrimvarsAPI(mesh)
         primvars_api.CreatePrimvar(
@@ -153,7 +156,8 @@ class TekoEnv(DirectRLEnv):
 
         # Conecta cor difusa à textura e remove brilho emissivo
         shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_out)
-        shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.3, 0.3, 0.3))
+        shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_out)
+
 
         # Finaliza material
         shader_output = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
