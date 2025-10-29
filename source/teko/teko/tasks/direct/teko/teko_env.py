@@ -79,7 +79,7 @@ class TekoEnv(DirectRLEnv):
         robot_prim = stage.GetPrimAtPath("/World/Robot")
         xf_robot = UsdGeom.Xformable(robot_prim)
         xf_robot.ClearXformOpOrder()
-        xf_robot.AddTranslateOp().Set(Gf.Vec3d(-0.3, 0.0, 0.43))
+        xf_robot.AddTranslateOp().Set(Gf.Vec3d(-0.2, 0.0, 0.43))
         xf_robot.AddRotateZOp().Set(180.0)
 
 
@@ -95,7 +95,7 @@ class TekoEnv(DirectRLEnv):
         xf_goal.AddRotateZOp().Set(180.0)
 
         # --- Placa ArUco ---
-        size = 0.22
+        size = 0.05
         half = size * 0.5
         ARUCO_PRIM_PATH = f"{ROBOT_GOAL_PATH}/Aruco"
 
@@ -113,7 +113,7 @@ class TekoEnv(DirectRLEnv):
         mesh.CreateDoubleSidedAttr(True)
 
         xf_aruco = UsdGeom.Xformable(mesh)
-        xf_aruco.AddTranslateOp().Set(Gf.Vec3f(0.28, 0.0, -0.045))
+        xf_aruco.AddTranslateOp().Set(Gf.Vec3f(0.17, 0.0, -0.045))
        
 
         primvars_api = UsdGeom.PrimvarsAPI(mesh)
@@ -243,3 +243,5 @@ class TekoEnv(DirectRLEnv):
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()
+
+

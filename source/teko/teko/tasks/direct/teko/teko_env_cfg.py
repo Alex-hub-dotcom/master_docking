@@ -20,7 +20,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     """Configuration for TEKO environment (one active robot + static RobotGoal)."""
 
     # --- General parameters -------------------------------------------
-    decimation = 2
+    decimation = 2                      # Subamostragem para fluidez
     episode_length_s = 30.0
 
     # --- Simulation ---------------------------------------------------
@@ -43,7 +43,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
         replicate_physics=True,
     )
 
-    # --- Degrees of freedom -------------------------------------------
+    # --- Degrees of freedom (Rodas) -----------------------------------
     dof_names = [
         "TEKO_Chassi_JointWheelFrontLeft",
         "TEKO_Chassi_JointWheelFrontRight",
@@ -54,7 +54,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # --- Action configuration -----------------------------------------
     action_scale = 1.0
     max_wheel_speed = 6.0
-    wheel_polarity = [1.0, -1.0, 1.0, -1.0]
+    wheel_polarity = [1.0, -1.0, 1.0, -1.0]  # Polarity para diferencial
 
     # --- Camera configuration -----------------------------------------
     class CameraCfg:
@@ -63,29 +63,28 @@ class TekoEnvCfg(DirectRLEnvCfg):
         )
         width = 640
         height = 480
-        frequency_hz = 30
-        focal_length = 3.6
+        frequency_hz = 15                 # Frequência razoável
+        focal_length = 3.6               # Próximo da câmera real RPi v2
         horiz_aperture = 4.8
         vert_aperture = 3.6
-        f_stop = 32.0
-        focus_distance = 10.0
-
+        f_stop = 16.0
+        focus_distance = 2.0             # Distância focal razoável
 
     camera = CameraCfg()
 
-    # --- Goal robot configuration -------------------------------------
+    # --- Goal robot configuration (com ArUco) -------------------------
     class GoalCfg:
         usd_path = "/workspace/teko/documents/CAD/USD/teko_goal.usd"
         prim_path = "/World/RobotGoal"
         aruco_texture = "/workspace/teko/documents/Aruco/4x4_1000-1.png"
         position = (1.0, 0.0, 0.0)
         aruco_offset = (0.1675, 0.0, -0.025)
-        aruco_size = 0.05
+        aruco_size = 0.05                # Pequeno mas legível
 
     goal = GoalCfg()
 
     # --- Observation and action spaces --------------------------------
-    action_space = (2,)
+    action_space = (2,)  # [esquerda, direita]
     observation_space = {
-        "rgb": (3, 480, 640),
+        "rgb": (3, 480, 640),  # PyTorch format: (C, H, W)
     }

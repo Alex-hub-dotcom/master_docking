@@ -150,3 +150,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ARUCO IS BEEN DETECTED WITH X, Y AND Z OK
