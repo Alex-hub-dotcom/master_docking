@@ -94,7 +94,7 @@ class TekoEnv(DirectRLEnv):
         xf_goal.AddRotateZOp().Set(180.0)
 
         # --- Placa ArUco ---
-        size = 0.15
+        size = 0.25
         half = size * 0.5
         ARUCO_PRIM_PATH = f"{ROBOT_GOAL_PATH}/Aruco"
 
@@ -153,7 +153,7 @@ class TekoEnv(DirectRLEnv):
 
         # Conecta cor difusa à textura e remove brilho emissivo
         shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_out)
-        shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.3, 0.3, 0.3))
 
         # Finaliza material
         shader_output = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)

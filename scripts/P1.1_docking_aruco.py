@@ -20,7 +20,7 @@ aruco_params = cv2.aruco.DetectorParameters()
 aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
 aruco_params.adaptiveThreshWinSizeMin = 3
 aruco_params.adaptiveThreshWinSizeMax = 33
-aruco_params.minMarkerPerimeterRate = 0.01
+aruco_params.minMarkerPerimeterRate = 0.005
 aruco_params.maxMarkerPerimeterRate = 4.0
 aruco_params.minCornerDistanceRate = 0.005
 aruco_params.errorCorrectionRate = 0.7
@@ -85,10 +85,12 @@ def main():
         img = to_numpy_img(frame)
 
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        gray = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
         gray = cv2.equalizeHist(gray)
 
         if step == 1:
             cv2.imwrite(os.path.join(out_dir, "aruco_debug_gray.png"), gray)
+            cv2.imwrite(os.path.join(out_dir, "aruco_debug_rgb.png"), img) 
 
         # ---- deteção ----
         corners, ids, rejected = detector.detectMarkers(gray)
