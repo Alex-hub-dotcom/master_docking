@@ -1,9 +1,9 @@
+############ ENV
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment — Isaac Lab 0.47.1 / Isaac Sim 5.0
----------------------------------------------------
+TEKO Environment — Isaac Lab 0.47.1
+-----------------------------------
 Active TEKO robot (RL agent) + static RobotGoal with emissive ArUco marker.
-Suporta múltiplos ambientes paralelos e fallback automático GPU→CPU.
 """
 
 from __future__ import annotations
@@ -28,23 +28,6 @@ class TekoEnv(DirectRLEnv):
     cfg: TekoEnvCfg
 
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
-        # --- Configura PhysX (GPU se possível) ---
-        try:
-            sim = SimulationContext.instance()
-            if cfg.use_gpu_physics:
-                sim.enable_gpu_dynamics(True)
-                print("[INFO] PhysX GPU habilitado (modo rápido).")
-            else:
-                sim.enable_gpu_dynamics(False)
-                print("[INFO] PhysX CPU forçado por configuração.")
-        except Exception as e:
-            print(f"[WARN] Falha ao configurar PhysX GPU ({e}); usando CPU fallback.")
-            try:
-                sim.enable_gpu_dynamics(False)
-            except Exception:
-                pass
-
-        # --- Inicialização padrão ---
         self._cam_res = (cfg.camera.width, cfg.camera.height)
         self._max_wheel_speed = cfg.max_wheel_speed
         self.actions = None
@@ -60,41 +43,51 @@ class TekoEnv(DirectRLEnv):
         if stage is None:
             raise RuntimeError("USD stage not initialized")
 
-        env0_path = self.scene.env_prim_paths[0]
-
         # --- Arena ---
         try:
             arena_path = "/workspace/teko/documents/CAD/USD/stage_arena.usd"
-            arena_prim = stage.DefinePrim(f"{env0_path}/StageArena", "Xform")
+            arena_prim = stage.DefinePrim(Sdf.Path("/World/StageArena"), "Xform")
             arena_prim.GetReferences().AddReference(arena_path)
         except Exception:
-            spawn_ground_plane(prim_path=f"{env0_path}/ground", cfg=GroundPlaneCfg())
+            spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        # --- Luz ambiente + sol ---
-        ambient = UsdLux.DomeLight.Define(stage, Sdf.Path(f"{env0_path}/AmbientLight"))
+      # --- Luz ambiente neutra + sol direcional ---
+        # Remove dome default azul
+        if stage.GetPrimAtPath("/World/DomeLight"):
+            stage.RemovePrim("/World/DomeLight")
+
+        # Luz ambiente uniforme (sem textura HDRI)
+        ambient = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/AmbientLight"))
         ambient.CreateIntensityAttr(4000.0)
-        ambient.CreateColorAttr(Gf.Vec3f(0.95, 0.95, 0.95))
+        ambient.CreateColorAttr(Gf.Vec3f(0.95, 0.95, 0.95))  # branco ligeiramente quente
+        ambient.CreateTextureFileAttr("")  # garante sem HDRI
 
-        sun = UsdLux.DistantLight.Define(stage, Sdf.Path(f"{env0_path}/SunLight"))
+        # Luz direcional (simula o sol)
+        sun = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/SunLight"))
         sun.CreateIntensityAttr(2000.0)
-        sun.CreateColorAttr(Gf.Vec3f(1.0, 0.98, 0.95))
+        sun.CreateColorAttr(Gf.Vec3f(1.0, 0.98, 0.95))  # tom levemente quente (realista)
         UsdGeom.Xformable(sun).AddRotateXOp().Set(-50.0)
         UsdGeom.Xformable(sun).AddRotateYOp().Set(30.0)
+
         print("[INFO] Luz ambiente neutra + sol direcional aplicados (sem HDRI).")
 
+
         # --- Robô ativo ---
-        self.robot = Articulation(TEKO_CONFIGURATION.replace(prim_path=f"{env0_path}/Robot"))
+        self.robot = Articulation(TEKO_CONFIGURATION.replace(prim_path="/World/Robot"))
         self.scene.articulations["robot"] = self.robot
-        robot_prim = stage.GetPrimAtPath(f"{env0_path}/Robot")
+
+        # Pose fixa (sem randomização)
+        robot_prim = stage.GetPrimAtPath("/World/Robot")
         xf_robot = UsdGeom.Xformable(robot_prim)
         xf_robot.ClearXformOpOrder()
         xf_robot.AddTranslateOp().Set(Gf.Vec3d(-0.2, 0.0, 0.43))
         xf_robot.AddRotateZOp().Set(180.0)
 
+
         # --- Robô alvo estático ---
         TEKO_USD_PATH = "/workspace/teko/documents/CAD/USD/teko_goal.usd"
         ARUCO_IMG_PATH = "/workspace/teko/documents/Aruco/test_marker.png"
-        ROBOT_GOAL_PATH = f"{env0_path}/RobotGoal"
+        ROBOT_GOAL_PATH = "/World/RobotGoal"
 
         robot_goal = stage.DefinePrim(ROBOT_GOAL_PATH, "Xform")
         robot_goal.GetReferences().AddReference(TEKO_USD_PATH)
@@ -106,17 +99,23 @@ class TekoEnv(DirectRLEnv):
         size = 0.05
         half = size * 0.5
         ARUCO_PRIM_PATH = f"{ROBOT_GOAL_PATH}/Aruco"
+
         mesh = UsdGeom.Mesh.Define(stage, ARUCO_PRIM_PATH)
         mesh.CreatePointsAttr([
-            Gf.Vec3f(0.0, -half, -half),
-            Gf.Vec3f(0.0,  half, -half),
-            Gf.Vec3f(0.0,  half,  half),
-            Gf.Vec3f(0.0, -half,  half),
+            Gf.Vec3f(0.0, -half, -half),  # canto inferior esquerdo
+            Gf.Vec3f(0.0,  half, -half),  # canto inferior direito
+            Gf.Vec3f(0.0,  half,  half),  # canto superior direito
+            Gf.Vec3f(0.0, -half,  half),  # canto superior esquerdo
         ])
+
+
         mesh.CreateFaceVertexCountsAttr([3, 3])
         mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 0, 2, 3])
         mesh.CreateDoubleSidedAttr(True)
-        UsdGeom.Xformable(mesh).AddTranslateOp().Set(Gf.Vec3f(0.17, 0.0, -0.045))
+
+        xf_aruco = UsdGeom.Xformable(mesh)
+        xf_aruco.AddTranslateOp().Set(Gf.Vec3f(0.17, 0.0, -0.045))
+       
 
         primvars_api = UsdGeom.PrimvarsAPI(mesh)
         primvars_api.CreatePrimvar(
@@ -128,44 +127,61 @@ class TekoEnv(DirectRLEnv):
             Gf.Vec2f(0.0, 1.0)
         ])
 
-        # --- Material emissivo (Aruco) ---
+        # --- Material plano (sem sombras, sem iluminação direta forte) ---
         LOOKS_PATH = f"{ROBOT_GOAL_PATH}/Looks/ArucoMaterial"
         material = UsdShade.Material.Define(stage, LOOKS_PATH)
+
+        # Textura UV (imagem do ArUco)
         tex = UsdShade.Shader.Define(stage, LOOKS_PATH + "/Texture")
         tex.CreateIdAttr("UsdUVTexture")
         tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(ARUCO_IMG_PATH))
         tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("clamp")
         tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("clamp")
+
+        # Ligação UV (coordenadas de textura)
         st_reader = UsdShade.Shader.Define(stage, LOOKS_PATH + "/stReader")
         st_reader.CreateIdAttr("UsdPrimvarReader_float2")
         st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
         st_reader_output = st_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
         tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_reader_output)
+
+        # Saída RGB da textura
         tex_out = tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+        # Shader principal (superfície)
         shader = UsdShade.Shader.Define(stage, LOOKS_PATH + "/Shader")
         shader.CreateIdAttr("UsdPreviewSurface")
         shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.0)
         shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
         shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(1.0)
+
+        # Conecta cor difusa à textura e remove brilho emissivo
         shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_out)
         shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(tex_out)
+
+
+        # Finaliza material
         shader_output = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
         material.CreateSurfaceOutput().ConnectToSource(shader_output)
         UsdShade.MaterialBindingAPI(mesh).Bind(material)
-        print("[INFO] ArUco material difuso aplicado com sucesso (multi-env).")
 
-        # --- Clona ambientes ---
+        print("[INFO] ArUco material difuso aplicado com sucesso (sem emissive).")
+
+
+
+        # --- Finaliza cena ---
         self.scene.clone_environments(copy_from_source=False)
 
         # --- Câmera ---
         sim = SimulationContext.instance()
         cam_path = self.cfg.camera.prim_path
-        cam_prim = sim.stage.GetPrimAtPath(f"{env0_path}{cam_path}")
+        cam_prim = sim.stage.GetPrimAtPath(cam_path)
         if not cam_prim.IsValid():
-            raise RuntimeError(f"[ERROR] Camera prim not found at {env0_path}{cam_path}")
-        print(f"[INFO] Using active robot camera at {env0_path}{cam_path}")
+            raise RuntimeError(f"[ERROR] Camera prim not found at {cam_path}")
+        print(f"[INFO] Using active robot camera at {cam_path}")
+
         self.camera = Camera(
-            prim_path=f"{env0_path}{cam_path}",
+            prim_path=cam_path,
             resolution=self._cam_res,
             frequency=self.cfg.camera.frequency_hz,
         )
@@ -194,11 +210,9 @@ class TekoEnv(DirectRLEnv):
                                device=self.device).unsqueeze(0) * self._max_wheel_speed
         polarity = torch.tensor(self.cfg.wheel_polarity,
                                 device=self.device).unsqueeze(0)
-        num_envs = self.scene.num_envs
-        env_ids = torch.arange(num_envs, device=self.device)
         self.robot.set_joint_velocity_target(
-            targets.repeat(num_envs, 1) * polarity,
-            env_ids=env_ids,
+            targets * polarity,
+            env_ids=torch.tensor([0], device=self.device),
             joint_ids=self.dof_idx)
 
     def _get_observations(self):
@@ -230,29 +244,102 @@ class TekoEnv(DirectRLEnv):
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()
-        self.actions = torch.zeros((self.scene.num_envs, 2), device=self.device)
 
-    def reset(self):
-        """Reset seguro multi-env sem crash CUDA."""
-        num_envs = self.scene.num_envs
-        self._lazy_init_articulation()
-        self.actions = torch.zeros((num_envs, 2), device=self.device)
-        return self._get_observations()
 
-    # ------------------------------------------------------------------
-    # Step estável (Ignora Fabric bug e faz fallback GPU→CPU)
-    # ------------------------------------------------------------------
-    def step(self, actions: torch.Tensor):
-        try:
-            self._pre_physics_step(actions)
-            self._apply_action()
-            self.sim.step(render=True)
-        except RuntimeError as e:
-            if "device-side assert" in str(e) or "GPU solveBlockUnified" in str(e):
-                print("[WARN] Crash PhysX GPU detectado! Alternando para CPU...")
-                sim = SimulationContext.instance()
-                sim.enable_gpu_dynamics(False)
-                self.sim.step(render=True)
-            else:
-                raise e
-        return self._get_observations()
+
+
+
+
+
+
+################# cfg
+# SPDX-License-Identifier: BSD-3-Clause
+"""
+TekoEnvCfg — environment configuration for TEKO with RGB camera.
+Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
+"""
+
+from __future__ import annotations
+
+from isaaclab.assets import ArticulationCfg
+from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.utils import configclass
+
+from .robots.teko import TEKO_CONFIGURATION
+
+
+@configclass
+class TekoEnvCfg(DirectRLEnvCfg):
+    """Configuration for TEKO environment (one active robot + static RobotGoal)."""
+
+    # --- General parameters -------------------------------------------
+    decimation = 2                      # Subamostragem para fluidez
+    episode_length_s = 30.0
+
+    # --- Simulation ---------------------------------------------------
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 120,
+        render_interval=decimation,
+        gravity=(0.0, 0.0, -9.81),
+        use_fabric=True,
+    )
+
+    # --- Active robot -------------------------------------------------
+    robot_cfg: ArticulationCfg = TEKO_CONFIGURATION.replace(
+        prim_path="/World/Robot"
+    )
+
+    # --- Scene configuration ------------------------------------------
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=1,
+        env_spacing=0.0,
+        replicate_physics=True,
+    )
+
+    # --- Degrees of freedom (Rodas) -----------------------------------
+    dof_names = [
+        "TEKO_Chassi_JointWheelFrontLeft",
+        "TEKO_Chassi_JointWheelFrontRight",
+        "TEKO_Chassi_JointWheelBackLeft",
+        "TEKO_Chassi_JointWheelBackRight",
+    ]
+
+    # --- Action configuration -----------------------------------------
+    action_scale = 1.0
+    max_wheel_speed = 6.0
+    wheel_polarity = [1.0, -1.0, 1.0, -1.0]  # Polarity para diferencial
+
+    # --- Camera configuration -----------------------------------------
+    class CameraCfg:
+        prim_path = (
+            "/World/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera"
+        )
+        width = 640
+        height = 480
+        frequency_hz = 15                 # Frequência razoável
+        focal_length = 3.6               # Próximo da câmera real RPi v2
+        horiz_aperture = 4.8
+        vert_aperture = 3.6
+        f_stop = 16.0
+        focus_distance = 2.0             # Distância focal razoável
+
+    camera = CameraCfg()
+
+    # --- Goal robot configuration (com ArUco) -------------------------
+    class GoalCfg:
+        usd_path = "/workspace/teko/documents/CAD/USD/teko_goal.usd"
+        prim_path = "/World/RobotGoal"
+        aruco_texture = "/workspace/teko/documents/Aruco/4x4_1000-1.png"
+        position = (1.0, 0.0, 0.0)
+        aruco_offset = (0.1675, 0.0, -0.025)
+        aruco_size = 0.05                # Pequeno mas legível
+
+    goal = GoalCfg()
+
+    # --- Observation and action spaces --------------------------------
+    action_space = (2,)  # [esquerda, direita]
+    observation_space = {
+        "rgb": (3, 480, 640),  # PyTorch format: (C, H, W)
+    }

@@ -17,13 +17,16 @@ from .robots.teko import TEKO_CONFIGURATION
 
 @configclass
 class TekoEnvCfg(DirectRLEnvCfg):
-    """Configuration for TEKO environment (one active robot + static RobotGoal)."""
+    """Configuration for TEKO environment (active robot + static RobotGoal)."""
 
     # --- General parameters -------------------------------------------
-    decimation = 2                      # Subamostragem para fluidez
+    decimation = 2
     episode_length_s = 30.0
 
     # --- Simulation ---------------------------------------------------
+    #  PhysX GPU ainda instável com múltiplos robôs → CPU = seguro
+    use_gpu_physics: bool = False
+
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         render_interval=decimation,
@@ -33,17 +36,17 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # --- Active robot -------------------------------------------------
     robot_cfg: ArticulationCfg = TEKO_CONFIGURATION.replace(
-        prim_path="/World/Robot"
+        prim_path="/Robot"
     )
 
     # --- Scene configuration ------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,
-        env_spacing=0.0,
+        num_envs=10,          # múltiplos ambientes paralelos
+        env_spacing=10.0,     # distância entre arenas
         replicate_physics=True,
     )
 
-    # --- Degrees of freedom (Rodas) -----------------------------------
+    # --- Degrees of freedom (rodas) -----------------------------------
     dof_names = [
         "TEKO_Chassi_JointWheelFrontLeft",
         "TEKO_Chassi_JointWheelFrontRight",
@@ -51,40 +54,39 @@ class TekoEnvCfg(DirectRLEnvCfg):
         "TEKO_Chassi_JointWheelBackRight",
     ]
 
-    # --- Action configuration -----------------------------------------
+    # --- Ações ---------------------------------------------------------
     action_scale = 1.0
     max_wheel_speed = 6.0
-    wheel_polarity = [1.0, -1.0, 1.0, -1.0]  # Polarity para diferencial
+    wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
-    # --- Camera configuration -----------------------------------------
+    # --- Camera --------------------------------------------------------
     class CameraCfg:
         prim_path = (
-            "/World/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera"
+            "/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera"
         )
         width = 640
         height = 480
-        frequency_hz = 15                 # Frequência razoável
-        focal_length = 3.6               # Próximo da câmera real RPi v2
+        frequency_hz = 15
+        focal_length = 3.6
         horiz_aperture = 4.8
         vert_aperture = 3.6
         f_stop = 16.0
-        focus_distance = 2.0             # Distância focal razoável
+        focus_distance = 2.0
 
     camera = CameraCfg()
 
-    # --- Goal robot configuration (com ArUco) -------------------------
+    # --- Goal robot (com ArUco emissivo) -------------------------------
     class GoalCfg:
         usd_path = "/workspace/teko/documents/CAD/USD/teko_goal.usd"
-        prim_path = "/World/RobotGoal"
+        prim_path = "/RobotGoal"
         aruco_texture = "/workspace/teko/documents/Aruco/4x4_1000-1.png"
         position = (1.0, 0.0, 0.0)
         aruco_offset = (0.1675, 0.0, -0.025)
-        aruco_size = 0.05                # Pequeno mas legível
+        aruco_size = 0.05
 
     goal = GoalCfg()
 
-    # --- Observation and action spaces --------------------------------
-    action_space = (2,)  # [esquerda, direita]
-    observation_space = {
-        "rgb": (3, 480, 640),  # PyTorch format: (C, H, W)
-    }
+    # --- Spaces --------------------------------------------------------
+    action_space = (2,)  # [left, right]
+    observation_space = {"rgb": (3, 480, 640)}
+
