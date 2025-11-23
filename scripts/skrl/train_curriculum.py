@@ -42,7 +42,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=16, help="Parallel environments")
 parser.add_argument("--steps", type=int, default=3_000_000, help="Total training steps")
 parser.add_argument("--seed", type=int, default=42, help="Random seed")
-parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
 parser.add_argument("--rollout_len", type=int, default=64, help="Rollout length")
 parser.add_argument("--epochs", type=int, default=8, help="PPO epochs per update")
 parser.add_argument("--checkpoint", type=str, default=None,
@@ -77,14 +77,14 @@ HYPERPARAMS = {
     "gae_lambda": 0.95,
     "clip_ratio": 0.2,
     "value_clip": 0.2,
-    "entropy_coef": 0.01,
+    "entropy_coef": 0.02,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
     "min_stage_steps": 15_000,    # minimum steps in a stage before checking advance
 }
 
 # Max steps allowed in a single stage before we *force* advancement
-MAX_STAGE_STEPS = 250_000
+MAX_STAGE_STEPS = 400_000
 
 
 def get_stage_threshold(level: int) -> float:
@@ -93,13 +93,13 @@ def get_stage_threshold(level: int) -> float:
     Returns the success rate required to move from this stage to the next.
     """
     if level <= 2:
-        return 0.90   # very easy baby-forward stages -> almost perfect
+        return 0.80   # very easy baby-forward stages -> almost perfect
     elif level <= 7:
-        return 0.80   # offset stages
+        return 0.70   # offset stages
     elif level <= 11:
-        return 0.70   # larger offsets / lateral
+        return 0.60   # larger offsets / lateral
     else:
-        return 0.60   # 180°, search, full autonomy
+        return 0.50   # 180°, search, full autonomy
 
 
 # =============================================================================
