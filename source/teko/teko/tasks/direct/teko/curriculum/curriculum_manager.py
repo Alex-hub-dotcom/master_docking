@@ -27,7 +27,6 @@ import torch
 
 from ..utils.geometry_utils import yaw_to_quat
 
-
 # Descriptive names for console logging
 STAGE_NAMES = [
     "Stage 0:  Baby Steps (5–12 cm, forward)",
