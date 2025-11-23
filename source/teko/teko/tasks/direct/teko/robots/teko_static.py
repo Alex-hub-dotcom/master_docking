@@ -2,10 +2,12 @@
 """
 TEKO Static Agent — Using teko_goal.usd
 ---------------------------------------
-✅ Uses pre-made static USD (no camera, no actuators)
-✅ Keeps collisions and gravity (falls naturally)
-✅ Adds ArUco marker for docking
+ Uses pre-made static USD (no camera, no actuators)
+ Keeps collisions and gravity (falls naturally)
+ Optionally adds ArUco marker for docking
 """
+
+from __future__ import annotations
 
 import time
 from pxr import UsdGeom, UsdShade, Sdf, Gf
@@ -13,14 +15,16 @@ from isaaclab.sim import SimulationContext
 
 
 class TEKOStatic:
-    def __init__(self, prim_path: str, aruco_path: str):
+    def __init__(self, prim_path: str, aruco_path: str | None = None):
         """
         Parameters
         ----------
         prim_path : str
             Where to spawn the static TEKO in the stage (e.g. /World/envs/env_0/RobotGoal).
-        aruco_path : str
+        aruco_path : str | None
             Path to the ArUco texture image.
+            - If None: no marker is created.
+            - If not None: an ArUco card is attached to the robot.
         """
         self.prim_path = prim_path
         self.aruco_path = aruco_path
@@ -36,7 +40,13 @@ class TEKOStatic:
 
         # Compose static robot
         self._load_usd()
-        self._create_aruco_marker()
+
+        # Only create marker if a path is provided
+        if self.aruco_path is not None:
+            self._create_aruco_marker()
+            print("[INFO] ArUco marker added to static TEKO.")
+        else:
+            print("[INFO] Static TEKO spawned WITHOUT ArUco marker.")
 
         print(f"[INFO] Static TEKO (teko_goal.usd) ready at {self.prim_path}")
 
@@ -48,7 +58,7 @@ class TEKOStatic:
 
         xf = UsdGeom.Xformable(goal_prim)
         xf.ClearXformOpOrder()
-        xf.AddTranslateOp().Set(Gf.Vec3f(1.5, 0.0, 0.4))  
+        xf.AddTranslateOp().Set(Gf.Vec3f(1.5, 0.0, 0.4))
         xf.AddRotateZOp().Set(180.0)
         print(f"[INFO] Loaded static TEKO from: {self.usd_path}")
 
@@ -74,7 +84,7 @@ class TEKOStatic:
 
         xf_aruco = UsdGeom.Xformable(mesh)
         xf_aruco.AddTranslateOp().Set(Gf.Vec3f(0.17, 0.0, -0.045))
-        #xf_aruco.AddRotateYOp().Set(180.0)  # face toward active robot
+        # xf_aruco.AddRotateYOp().Set(180.0)  # face toward active robot (optional)
 
         # Add UVs
         primvars_api = UsdGeom.PrimvarsAPI(mesh)
@@ -91,7 +101,9 @@ class TEKOStatic:
 
         tex = UsdShade.Shader.Define(self.stage, looks_path + "/Texture")
         tex.CreateIdAttr("UsdUVTexture")
-        tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(Sdf.AssetPath(aruco_img_path))
+        tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+            Sdf.AssetPath(aruco_img_path)
+        )
         tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("clamp")
         tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("clamp")
 
@@ -113,7 +125,7 @@ class TEKOStatic:
             tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
         )
 
-        material.CreateSurfaceOutput().ConnectToSource(shader.CreateOutput("surface", Sdf.ValueTypeNames.Token))
+        material.CreateSurfaceOutput().ConnectToSource(
+            shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        )
         UsdShade.MaterialBindingAPI(mesh).Bind(material)
-
-        print("[INFO] ArUco marker added to static TEKO.")

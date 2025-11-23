@@ -236,7 +236,7 @@ class TekoEnv(DirectRLEnv):
             try:
                 TEKOStatic(
                     prim_path=f"{env_path}/RobotGoal",
-                    aruco_path=ARUCO_IMG_PATH,
+                    #aruco_path=ARUCO_IMG_PATH,             # <- disable marker
                 )
                 print(f"[INFO] Spawned static TEKO goal in env_{env_idx}")
             except Exception as e:
