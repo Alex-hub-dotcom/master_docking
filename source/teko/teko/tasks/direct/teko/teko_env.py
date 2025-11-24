@@ -6,6 +6,7 @@ TEKO Environment - Curriculum Compatible
 - Nuclear penalties (-500 collision/boundary)
 - Survival bonus (+0.3/step)
 - Anti-crash exploit (min_collision_steps=10)
+- Frame stacking: returns stacked RGB frames [3 * K, H, W]
 
 This environment was created for the TEKO vision-based docking project.
 
@@ -52,6 +53,12 @@ class TekoEnv(DirectRLEnv):
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
         # Camera resolution (used for observation tensor shape)
         self._cam_res = (cfg.camera.width, cfg.camera.height)
+
+        # Frame stacking configuration
+        # If cfg does not define num_frame_stack, default to 4
+        self.num_frame_stack = getattr(cfg, "num_frame_stack", 4)
+        self.frame_stack = None  # will hold [num_envs, K, 3, H, W] on device
+        self.frame_counts = None  # used to reinitialize stack after resets
 
         # Torque scaling for the wheels
         self._max_wheel_torque = cfg.max_wheel_torque
@@ -129,10 +136,11 @@ class TekoEnv(DirectRLEnv):
         self._cache_goal_transforms()
 
     def _init_observation_space(self):
-        """Define the observation space (here: only RGB images)."""
+        """Define the observation space (here: stacked RGB images)."""
         import gymnasium as gym
 
-        frame_shape = (3, self.cfg.camera.height, self.cfg.camera.width)
+        num_channels = 3 * self.num_frame_stack
+        frame_shape = (num_channels, self.cfg.camera.height, self.cfg.camera.width)
         self.observation_space = gym.spaces.Dict(
             {
                 "rgb": gym.spaces.Box(
@@ -143,7 +151,9 @@ class TekoEnv(DirectRLEnv):
                 )
             }
         )
-        print(f"[INFO] Observation space set to {frame_shape}, range [0, 1]")
+        print(
+            f"[INFO] Observation space set to {frame_shape} (frame stack K={self.num_frame_stack}), range [0, 1]"
+        )
 
     def _setup_global_lighting(self, stage):
         """Simple dome + sun lighting to make the scene visible on camera."""
@@ -193,8 +203,7 @@ class TekoEnv(DirectRLEnv):
 
         # Neutral color (you can hide it later if needed)
         UsdGeom.Gprim(cube).CreateDisplayColorAttr([Gf.Vec3f(0.4, 0.4, 0.4)])
-        #UsdGeom.Gprim(cube).CreateDisplayColorAttr([Gf.Vec3f(0.2, 0.8, 0.2)]) #for debuggin use color for visual assitance
-        
+        #UsdGeom.Gprim(cube).CreateDisplayColorAttr([Gf.Vec3f(0.2, 0.8, 0.2)]) #for debugging use color for visual assistance
 
         print(f"[DEBUG] Spawned ground plane for env_{env_idx} at z={floor_z}")
 
@@ -515,47 +524,83 @@ class TekoEnv(DirectRLEnv):
         )
 
     # ------------------------------------------------------------------
-    # Observations
+    # Observations (with frame stacking)
     # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
         """
-        Capture RGB images from each camera and stack them into
-        a tensor of shape [num_envs, 3, H, W] in [0, 1].
+        Capture RGB images from each camera, update the frame stack,
+        and return stacked observations of shape
+        [num_envs, 3 * num_frame_stack, H, W] in [0, 1].
         """
         import torch.nn.functional as F
 
         num_envs = self.scene.cfg.num_envs
         h, w = self._cam_res[1], self._cam_res[0]
-        rgb_obs = torch.zeros((num_envs, 3, h, w), device=self.device)
+
+        # Lazy initialization of frame stack buffers
+        if self.frame_stack is None:
+            self.frame_stack = torch.zeros(
+                (num_envs, self.num_frame_stack, 3, h, w),
+                device=self.device,
+                dtype=torch.float32,
+            )
+        if self.frame_counts is None:
+            self.frame_counts = torch.zeros(
+                num_envs, device=self.device, dtype=torch.int32
+            )
+
+        # Current RGB frames for all envs: [num_envs, 3, H, W]
+        rgb_current = torch.zeros((num_envs, 3, h, w), device=self.device)
 
         for env_idx, cam in enumerate(self.cameras):
             cam.update(dt=0.0)
 
             rgb_data = cam.data.output["rgb"]
-            if rgb_data is not None and rgb_data.numel() > 0:
-                # Isaac Lab sometimes returns [1, H, W, C]
-                if rgb_data.ndim == 4:
-                    rgb_data = rgb_data.squeeze(0)
+            if rgb_data is None or rgb_data.numel() == 0:
+                continue
 
-                # Drop alpha channel if present (RGBA -> RGB)
-                if rgb_data.shape[-1] == 4:
-                    rgb_data = rgb_data[..., :3]
+            # Isaac Lab sometimes returns [1, H, W, C]
+            if rgb_data.ndim == 4:
+                rgb_data = rgb_data.squeeze(0)
 
-                # Convert to [C, H, W] and normalize to [0, 1]
-                rgb = rgb_data.permute(2, 0, 1).float() / 255.0
+            # Drop alpha channel if present (RGBA -> RGB)
+            if rgb_data.shape[-1] == 4:
+                rgb_data = rgb_data[..., :3]
 
-                # Make sure resolution is exactly (H, W)
-                if rgb.shape[1] != h or rgb.shape[2] != w:
-                    rgb = F.interpolate(
-                        rgb.unsqueeze(0),
-                        size=(h, w),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).squeeze(0)
+            # Convert to [C, H, W] and normalize to [0, 1]
+            rgb = rgb_data.permute(2, 0, 1).float() / 255.0
 
-                rgb_obs[env_idx] = rgb
+            # Make sure resolution is exactly (H, W)
+            if rgb.shape[1] != h or rgb.shape[2] != w:
+                rgb = F.interpolate(
+                    rgb.unsqueeze(0),
+                    size=(h, w),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0)
 
-        return {"rgb": rgb_obs}
+            rgb_current[env_idx] = rgb
+
+        # Env episodes that have just been reset:
+        # first observation after reset repeats the same frame K times.
+        reset_mask = self.frame_counts == 0
+        if reset_mask.any():
+            idx = reset_mask.nonzero(as_tuple=False).squeeze(-1)
+            self.frame_stack[idx, :, :, :, :] = rgb_current[idx].unsqueeze(1)
+            self.frame_counts[idx] = self.num_frame_stack
+
+        # Non-reset envs: shift the stack and append the latest frame
+        non_reset_mask = ~reset_mask
+        if non_reset_mask.any():
+            idx = non_reset_mask.nonzero(as_tuple=False).squeeze(-1)
+            # Shift frames to the left and insert new one at the end
+            self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
+            self.frame_stack[idx, -1] = rgb_current[idx]
+
+        # Collapse frame dimension into channels: [N, 3 * K, H, W]
+        stacked_rgb = self.frame_stack.view(num_envs, 3 * self.num_frame_stack, h, w)
+
+        return {"rgb": stacked_rgb}
 
     # ------------------------------------------------------------------
     # Rewards
@@ -678,6 +723,11 @@ class TekoEnv(DirectRLEnv):
         # Reset per-episode state
         self.prev_actions[env_ids] = 0.0
         self.step_count[env_ids] = 0
+
+        # Mark these envs so that the frame stack is reinitialized
+        # on the next call to _get_observations.
+        if self.frame_counts is not None:
+            self.frame_counts[env_ids] = 0
 
         # Curriculum-based spawn (different stages = different initial poses)
         reset_environment_curriculum(self, env_ids)

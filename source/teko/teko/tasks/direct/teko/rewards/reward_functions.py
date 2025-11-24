@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward functions for TEKO (v7.3 – curriculum aligned, precision-focused)
-------------------------------------------------------------------------
+Reward functions for TEKO (v7.4 – curriculum aligned, offset-stage optimized)
+-----------------------------------------------------------------------------
 
 Main ideas:
-- Progress reward is still the main dense signal, but less dominant.
-- Alignment is much more important (robot should point the rear to the goal).
-- Extra bonuses:
-  - "Facing bonus" when close and well aligned.
-  - "Approach bonus" when getting closer while roughly aligned.
-- Collision penalty softened to -100 to allow more exploration on harder stages.
-- Precision bonus kept for very tight docking (< 2 cm).
+- **Stronger progress + alignment** signals for offset stages (S4-S11)
+- **Distance reward** provides gradient at medium ranges
+- **Alignment reward** is the #1 priority (rear must face goal)
+- **Facing/approach bonuses** encourage correct orientation
+- **Collision penalty** is stern but not catastrophic (-150)
+- **Boundary penalty** remains nuclear (-500)
+- **Success bonus** is generous (+250) to motivate docking
+
+Changes from v7.3:
+- Increased distance reward scale: -1.5 → -2.5 (stronger gradient)
+- Increased progress reward: 8.0 → 12.0 (more reward for closing distance)
+- Increased alignment reward: 2.0 → 3.0 (critical for offset stages)
+- Collision penalty: -100 → -150 (discourages crashing without being catastrophic)
 """
 
 from __future__ import annotations
@@ -41,22 +47,21 @@ def compute_total_reward(env) -> torch.Tensor:
         env.prev_distance = surface_xy.clone()
 
     # ---------------------------------------------------------------------
-    # 1. Distance reward (moderate shaping: closer is better)
+    # 1. Distance reward (stronger shaping: closer is better)
     # ---------------------------------------------------------------------
-    distance_reward = -1.5 * surface_xy
-    distance_reward = torch.clamp(distance_reward, min=-8.0, max=0.0)
+    distance_reward = -2.5 * surface_xy  # was -1.5 ✅
+    distance_reward = torch.clamp(distance_reward, min=-12.0, max=0.0)  # was -8.0 ✅
 
     # ---------------------------------------------------------------------
-    # 2. Progress reward (main dense signal, but not overwhelming)
-    #    Positive when the robot gets closer to the goal.
+    # 2. Progress reward (MAIN DENSE SIGNAL - boosted for offset stages)
     # ---------------------------------------------------------------------
     progress = env.prev_distance - surface_xy
-    progress_reward = 8.0 * progress  # was 15.0
-    progress_reward = torch.clamp(progress_reward, min=-3.0, max=3.0)
+    progress_reward = 12.0 * progress  # was 8.0 ✅
+    progress_reward = torch.clamp(progress_reward, min=-5.0, max=5.0)  # was ±3.0 ✅
     env.prev_distance = surface_xy.clone()
 
     # ---------------------------------------------------------------------
-    # 3. Alignment reward (rear must face the goal)
+    # 3. Alignment reward (CRITICAL for offset stages - rear must face goal)
     # ---------------------------------------------------------------------
     robot_quat = env.robot.data.root_quat_w
     robot_pos = env.robot.data.root_pos_w
@@ -74,8 +79,8 @@ def compute_total_reward(env) -> torch.Tensor:
     rear_yaw = robot_yaw + torch.pi
     yaw_error = _angle_wrap(rear_yaw - goal_yaw)
 
-    # Stronger alignment weight: [-2, 2]
-    alignment_reward = 2.0 * torch.cos(yaw_error)
+    # Stronger alignment weight: [-3, 3] (was [-2, 2]) ✅
+    alignment_reward = 3.0 * torch.cos(yaw_error)
 
     # 3a. Facing bonus: close and reasonably aligned
     close_and_aligned = (surface_xy < 0.15) & (torch.abs(yaw_error) < np.deg2rad(30.0))
@@ -110,7 +115,7 @@ def compute_total_reward(env) -> torch.Tensor:
     env.prev_actions = env.actions.clone()
 
     # ---------------------------------------------------------------------
-    # 6. Collision penalty (AABB overlap, softened to -100)
+    # 6. Collision penalty (AABB overlap, stern but not catastrophic)
     # ---------------------------------------------------------------------
     raw_success = surface_xy < 0.03
 
@@ -134,12 +139,12 @@ def compute_total_reward(env) -> torch.Tensor:
 
     collision_penalty = torch.where(
         collision,
-        torch.tensor(-100.0, device=device),  # was -300, then -200
+        torch.tensor(-150.0, device=device),  # was -100 ✅
         torch.tensor(0.0, device=device),
     )
 
     # ---------------------------------------------------------------------
-    # 7. Boundary penalty (leaving the arena is always terrible)
+    # 7. Boundary penalty (leaving the arena is NUCLEAR)
     # ---------------------------------------------------------------------
     env_origins = env.scene.env_origins
     robot_pos_local = robot_pos_global - env_origins

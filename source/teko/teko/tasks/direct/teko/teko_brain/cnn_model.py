@@ -7,27 +7,34 @@ Stripped-down build: only a lightweight custom CNN (SimpleCNN), trained from scr
 Key points:
 - No torchvision / MobileNet dependency.
 - BatchNorm after each Conv for more stable training.
-- ImageNet-style normalization, stored as buffers (no allocations in forward).
-- `DockingCNN` is kept as an alias of `SimpleCNN` for backwards compatibility.
-- `create_visual_encoder(...)` accepts "simple" or "mobilenet" but both return SimpleCNN.
+- NO ImageNet normalization (data comes in [0,1] from environment)
+- Supports stacked frames: input [B, 3 * K, H, W] is reshaped to K RGB frames.
+- Aggregation over time by mean-pooling the per-frame features.
 
 Author: Alexandre Schleier Neves da Silva
-If you have questions or need support, contact:
-  alexandre.schleiernevesdasilva@uni-hohenheim.de
+Contact: alexandre.schleiernevesdasilva@uni-hohenheim.de
 """
 
 import torch
 import torch.nn as nn
 
 
-# ================================================================
-#  SimpleCNN (Lightweight custom architecture)
-# ================================================================
 class SimpleCNN(nn.Module):
     """
     Lightweight CNN for the TEKO docking task.
-    This model is always trained from scratch.
+
+    Supports both:
+      - single-frame input: [B, 3, H, W]
+      - stacked frames:     [B, 3 * K, H, W]
+
+    For stacked frames, the network:
+      1) reshapes to [B, K, 3, H, W],
+      2) runs each frame independently through the same CNN,
+      3) mean-pools the resulting features over the K frames.
+    
+    ✅ IMPORTANT: Input data MUST be in [0, 1] range (already normalized in env).
     """
+
     def __init__(self, feature_dim: int = 256):
         super().__init__()
 
@@ -65,18 +72,11 @@ class SimpleCNN(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(n_flat, 512),
             nn.ReLU(inplace=True),
-            # No dropout: keep behaviour deterministic for RL.
             nn.Linear(512, feature_dim),
             nn.ReLU(inplace=True),
         )
 
         self.feature_dim = feature_dim
-
-        # --- Register normalization buffers (no realloc on each forward) ---
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        self.register_buffer("img_mean", mean, persistent=False)
-        self.register_buffer("img_std", std, persistent=False)
 
         # --- Initialize weights ---
         for m in self.modules():
@@ -94,18 +94,43 @@ class SimpleCNN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: RGB images [B, 3, H, W], values in [0, 1].
+            x: RGB images in [0, 1] range with shape:
+                 - [B, 3, H, W]          (single frame), or
+                 - [B, 3 * K, H, W]      (K stacked frames).
 
         Returns:
             features: [B, feature_dim]
         """
-        # Normalize (same as ImageNet for consistency,
-        # even though we don't use pretrained weights)
-        x = (x - self.img_mean) / self.img_std
+        if x.ndim != 4:
+            raise ValueError(f"Expected 4D input [B, C, H, W], got {x.shape}")
 
+        b, c, h, w = x.shape
+        if c % 3 != 0:
+            raise ValueError(
+                f"Expected channel dimension to be a multiple of 3 (RGB frames), "
+                f"got C={c}"
+            )
+
+        num_frames = c // 3
+
+        # Reshape to [B, K, 3, H, W] for per-frame processing
+        x = x.view(b, num_frames, 3, h, w)
+
+        # ✅ NO NORMALIZATION - data is already in [0, 1] from environment!
+        # The environment already does: rgb = rgb_data.permute(2, 0, 1).float() / 255.0
+
+        # Collapse time dimension into batch: [B * K, 3, H, W]
+        x = x.view(b * num_frames, 3, h, w)
+
+        # Standard CNN forward
         x = self.features(x)
         x = torch.flatten(x, 1)
-        return self.fc(x)
+        x = self.fc(x)  # [B * K, feature_dim]
+
+        # Aggregate over frames (mean pooling over time): [B, feature_dim]
+        x = x.view(b, num_frames, self.feature_dim).mean(dim=1)
+
+        return x
 
 
 # ================================================================
@@ -124,7 +149,7 @@ def create_visual_encoder(
     Args:
         architecture: "simple" or "mobilenet" (both map to SimpleCNN here).
         feature_dim:  Output feature dimension for the RL policy.
-        pretrained:   Ignored (kept so old code doesn't break).
+        pretrained:   Ignored (kept so old code does not break).
 
     Returns:
         nn.Module: encoder instance (SimpleCNN)
@@ -148,7 +173,6 @@ def create_visual_encoder(
 
 # ----------------------------------------------------------------
 # Backwards-compat alias: some code still imports DockingCNN.
-# We map it to SimpleCNN so those imports continue to work.
 # ----------------------------------------------------------------
 DockingCNN = SimpleCNN
 
@@ -159,11 +183,17 @@ DockingCNN = SimpleCNN
 if __name__ == "__main__":
     print("Testing SimpleCNN model...")
 
-    test_input = torch.randn(4, 3, 480, 640)
+    # Single-frame input
+    test_input_1 = torch.rand(4, 3, 480, 640)  # [0, 1] range
     s = SimpleCNN(feature_dim=256)
-    out = s(test_input)
-    print(f"   Input:  {test_input.shape}")
-    print(f"   Output: {out.shape}")
-    print(f"   Params: {sum(p.numel() for p in s.parameters()):,}")
+    out_1 = s(test_input_1)
+    print(f"Single-frame input:  {test_input_1.shape} -> {out_1.shape}")
+    print(f"  Output range: [{out_1.min().item():.3f}, {out_1.max().item():.3f}]")
+
+    # Stacked-frame input (e.g., 4 frames -> 12 channels)
+    test_input_4 = torch.rand(4, 12, 480, 640)  # [0, 1] range
+    out_4 = s(test_input_4)
+    print(f"Stacked-frame input: {test_input_4.shape} -> {out_4.shape}")
+    print(f"  Output range: [{out_4.min().item():.3f}, {out_4.max().item():.3f}]")
 
     print("\n✓ SimpleCNN test passed!")
