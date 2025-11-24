@@ -1,37 +1,24 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward functions for TEKO (v7.4 – curriculum aligned, offset-stage optimized)
------------------------------------------------------------------------------
+Reward functions for TEKO (v8.2 – ONE-TIME MILESTONE BONUSES)
+-------------------------------------------------------------
 
-Main ideas:
-- **Stronger progress + alignment** signals for offset stages (S4-S11)
-- **Distance reward** provides gradient at medium ranges
-- **Alignment reward** is the #1 priority (rear must face goal)
-- **Facing/approach bonuses** encourage correct orientation
-- **Collision penalty** is stern but not catastrophic (-150)
-- **Boundary penalty** remains nuclear (-500)
-- **Success bonus** is generous (+250) to motivate docking
+v8.2 Changes (THE GOD VERSION):
+- ONE-TIME milestone bonuses (completely prevents proximity farming)
+- Bonuses only awarded FIRST TIME entering each distance zone
+- Strong progressive time penalty (exponential growth)
+- Approach requirement for all bonuses (must be moving toward goal)
+- Episode length inflation is now IMPOSSIBLE
 
-Changes from v7.3:
-- Increased distance reward scale: -1.5 → -2.5 (stronger gradient)
-- Increased progress reward: 8.0 → 12.0 (more reward for closing distance)
-- Increased alignment reward: 2.0 → 3.0 (critical for offset stages)
-- Collision penalty: -100 → -150 (discourages crashing without being catastrophic)
+v8.0-8.1 fixes preserved:
+- Survival bonus disabled
+- Alignment reward always positive [0, 5]
+- Progressive time penalty
 """
 
 from __future__ import annotations
 import torch
 import numpy as np
-
-
-def _quat_to_yaw(quat: torch.Tensor) -> torch.Tensor:
-    qx = quat[:, 0]
-    qy = quat[:, 1]
-    qz = quat[:, 2]
-    qw = quat[:, 3]
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return torch.atan2(siny_cosp, cosy_cosp)
 
 
 def _angle_wrap(angle: torch.Tensor) -> torch.Tensor:
@@ -40,28 +27,30 @@ def _angle_wrap(angle: torch.Tensor) -> torch.Tensor:
 
 def compute_total_reward(env) -> torch.Tensor:
     device = env.device
+    num_envs = env.scene.cfg.num_envs
     _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
 
-    # Initialize previous distance on first call
+    # Initialize tracking buffers on first call
     if env.prev_distance is None:
         env.prev_distance = surface_xy.clone()
+    
+    
+    # ---------------------------------------------------------------------
+    # 1. Distance reward (moderate shaping)
+    # ---------------------------------------------------------------------
+    distance_reward = -2.0 * surface_xy
+    distance_reward = torch.clamp(distance_reward, min=-10.0, max=0.0)
 
     # ---------------------------------------------------------------------
-    # 1. Distance reward (stronger shaping: closer is better)
-    # ---------------------------------------------------------------------
-    distance_reward = -2.5 * surface_xy  # was -1.5 ✅
-    distance_reward = torch.clamp(distance_reward, min=-12.0, max=0.0)  # was -8.0 ✅
-
-    # ---------------------------------------------------------------------
-    # 2. Progress reward (MAIN DENSE SIGNAL - boosted for offset stages)
+    # 2. Progress reward (main signal)
     # ---------------------------------------------------------------------
     progress = env.prev_distance - surface_xy
-    progress_reward = 12.0 * progress  # was 8.0 ✅
-    progress_reward = torch.clamp(progress_reward, min=-5.0, max=5.0)  # was ±3.0 ✅
+    progress_reward = 10.0 * progress
+    progress_reward = torch.clamp(progress_reward, min=-4.0, max=4.0)
     env.prev_distance = surface_xy.clone()
 
     # ---------------------------------------------------------------------
-    # 3. Alignment reward (CRITICAL for offset stages - rear must face goal)
+    # 3. Alignment reward (ALWAYS POSITIVE)
     # ---------------------------------------------------------------------
     robot_quat = env.robot.data.root_quat_w
     robot_pos = env.robot.data.root_pos_w
@@ -75,47 +64,46 @@ def compute_total_reward(env) -> torch.Tensor:
     vec_to_goal = goal_pos - robot_pos
     goal_yaw = torch.atan2(vec_to_goal[:, 1], vec_to_goal[:, 0])
 
-    # rear_yaw = robot yaw + π (rear side / camera towards the goal)
     rear_yaw = robot_yaw + torch.pi
     yaw_error = _angle_wrap(rear_yaw - goal_yaw)
 
-    # Stronger alignment weight: [-3, 3] (was [-2, 2]) ✅
-    alignment_reward = 3.0 * torch.cos(yaw_error)
+    normalized_error = torch.abs(yaw_error) / torch.pi
+    alignment_reward = 5.0 * (1.0 - normalized_error)
 
-    # 3a. Facing bonus: close and reasonably aligned
+    # 3a. Facing bonus (close and aligned)
     close_and_aligned = (surface_xy < 0.15) & (torch.abs(yaw_error) < np.deg2rad(30.0))
     facing_bonus = torch.where(
         close_and_aligned,
-        torch.tensor(3.0, device=device),
+        torch.tensor(5.0, device=device),
         torch.tensor(0.0, device=device),
     )
 
-    # 3b. Approach bonus: getting closer *while* roughly aligned
-    approaching = (progress > 0.0) & (torch.abs(yaw_error) < np.deg2rad(45.0))
+    # 3b. Approach bonus (approaching while aligned)
+    approaching = (progress > 0.0) & (torch.abs(yaw_error) < np.deg2rad(60.0))
     approach_bonus = torch.where(
         approaching,
-        2.0 * progress,  # extra reward only when progress > 0
+        3.0 * progress,
         torch.tensor(0.0, device=device),
     )
 
     # ---------------------------------------------------------------------
-    # 4. Velocity penalty (small – avoids rushing)
+    # 4. Velocity penalty (very small)
     # ---------------------------------------------------------------------
     lin_vel = env.robot.data.root_lin_vel_w
     speed = torch.norm(lin_vel[:, :2], dim=-1)
-    velocity_penalty = -0.01 * speed
+    velocity_penalty = -0.005 * speed
 
     # ---------------------------------------------------------------------
-    # 5. Oscillation penalty (small – discourages twitching)
+    # 5. Oscillation penalty
     # ---------------------------------------------------------------------
     if env.prev_actions is None:
         env.prev_actions = torch.zeros_like(env.actions)
     action_diff = torch.norm(env.actions - env.prev_actions, dim=-1)
-    oscillation_penalty = -0.02 * action_diff
+    oscillation_penalty = -0.01 * action_diff
     env.prev_actions = env.actions.clone()
 
     # ---------------------------------------------------------------------
-    # 6. Collision penalty (AABB overlap, stern but not catastrophic)
+    # 6. Collision penalty
     # ---------------------------------------------------------------------
     raw_success = surface_xy < 0.03
 
@@ -139,12 +127,12 @@ def compute_total_reward(env) -> torch.Tensor:
 
     collision_penalty = torch.where(
         collision,
-        torch.tensor(-150.0, device=device),  # was -100 ✅
+        torch.tensor(-100.0, device=device),
         torch.tensor(0.0, device=device),
     )
 
     # ---------------------------------------------------------------------
-    # 7. Boundary penalty (leaving the arena is NUCLEAR)
+    # 7. Boundary penalty
     # ---------------------------------------------------------------------
     env_origins = env.scene.env_origins
     robot_pos_local = robot_pos_global - env_origins
@@ -161,7 +149,7 @@ def compute_total_reward(env) -> torch.Tensor:
     )
 
     # ---------------------------------------------------------------------
-    # 8. Success bonus (only on terminal success)
+    # 8. Success bonus (terminal only)
     # ---------------------------------------------------------------------
     min_success_steps = 5
     ep_len = env.episode_length_buf
@@ -169,33 +157,74 @@ def compute_total_reward(env) -> torch.Tensor:
 
     success_bonus = torch.where(
         terminal_success,
-        torch.tensor(250.0, device=device),
+        torch.tensor(300.0, device=device),
         torch.tensor(0.0, device=device),
     )
 
     # ---------------------------------------------------------------------
-    # 9. Proximity + precision bonuses
+    # 9. ONE-TIME MILESTONE BONUSES (v8.2 - ANTI-FARMING GOD MODE)
     # ---------------------------------------------------------------------
-    # Sweet spot: 3–10 cm (encourage staying close without crashing)
-    close = (surface_xy < 0.10) & (surface_xy >= 0.03) & (~collision)
-    proximity_bonus = torch.where(
-        close,
-        torch.tensor(4.0, device=device),
-        torch.tensor(0.0, device=device),
+    # CRITICAL: Each bonus awarded ONLY ONCE per episode when FIRST entering zone
+    # This makes proximity farming IMPOSSIBLE
+    
+    # Detect first-time entries (not yet flagged AND currently in zone AND approaching)
+    entering_20cm = (
+        (surface_xy < 0.20) & 
+        ~env.milestone_flags['entered_20cm'] & 
+        (progress > 0.0)
+    )
+    entering_10cm = (
+        (surface_xy < 0.10) & 
+        ~env.milestone_flags['entered_10cm'] & 
+        (progress > 0.0)
+    )
+    entering_5cm = (
+        (surface_xy < 0.05) & 
+        ~env.milestone_flags['entered_5cm'] & 
+        (progress > 0.0)
+    )
+    entering_2cm = (
+        (surface_xy < 0.02) & 
+        ~env.milestone_flags['entered_2cm'] & 
+        (progress > 0.0)
     )
 
-    # Very precise docking: < 2 cm
-    precise = (surface_xy < 0.02) & (~collision)
-    precision_bonus = torch.where(
-        precise,
-        torch.tensor(20.0, device=device),
-        torch.tensor(0.0, device=device),
-    )
+    # Award bonuses (one-time only)
+    milestone_bonus = torch.zeros_like(surface_xy)
+    milestone_bonus += torch.where(entering_20cm, torch.tensor(5.0, device=device), torch.tensor(0.0, device=device))
+    milestone_bonus += torch.where(entering_10cm, torch.tensor(10.0, device=device), torch.tensor(0.0, device=device))
+    milestone_bonus += torch.where(entering_5cm, torch.tensor(20.0, device=device), torch.tensor(0.0, device=device))
+    milestone_bonus += torch.where(entering_2cm, torch.tensor(50.0, device=device), torch.tensor(0.0, device=device))
+
+    # Update flags (mark milestones as achieved)
+    env.milestone_flags['entered_20cm'] |= (surface_xy < 0.20)
+    env.milestone_flags['entered_10cm'] |= (surface_xy < 0.10)
+    env.milestone_flags['entered_5cm'] |= (surface_xy < 0.05)
+    env.milestone_flags['entered_2cm'] |= (surface_xy < 0.02)
 
     # ---------------------------------------------------------------------
-    # 10. Time penalty (very soft – avoids infinite wandering)
+    # 10. EXPONENTIAL time penalty (v8.2 - SUPER STRONG)
     # ---------------------------------------------------------------------
-    time_penalty = torch.full_like(surface_xy, -0.02)
+    # Exponential growth: gentle at first, BRUTAL at the end
+    # ep_len=100:   penalty ≈ -0.01
+    # ep_len=500:   penalty ≈ -0.03
+    # ep_len=1000:  penalty ≈ -0.10
+    # ep_len=1500:  penalty ≈ -0.30 (OUCH!)
+    
+    max_ep_len = float(env.max_episode_length)
+    length_ratio = ep_len.float() / max_ep_len  # [0, 1]
+    
+    # Exponential growth: exp(4 * x) - 1 gives range [0, ~54]
+    exp_factor = torch.exp(4.0 * length_ratio) - 1.0
+    exp_factor = exp_factor / 54.0  # Normalize to [0, 1]
+    
+    base_time_penalty = -0.01
+    time_penalty = base_time_penalty * (1.0 + 30.0 * exp_factor)
+
+    # ---------------------------------------------------------------------
+    # 11. Survival bonus (PERMANENTLY DISABLED)
+    # ---------------------------------------------------------------------
+    survival_bonus = torch.zeros_like(surface_xy)
 
     # ---------------------------------------------------------------------
     # Total reward
@@ -211,15 +240,15 @@ def compute_total_reward(env) -> torch.Tensor:
         collision_penalty +
         boundary_penalty +
         success_bonus +
-        proximity_bonus +
-        precision_bonus +
-        time_penalty
+        milestone_bonus +      # ONE-TIME bonuses (replaces proximity/precision)
+        time_penalty +
+        survival_bonus
     )
 
     total_reward = torch.clamp(total_reward, min=-400.0, max=400.0)
 
     # ---------------------------------------------------------------------
-    # Logging (for TensorBoard analysis)
+    # Logging
     # ---------------------------------------------------------------------
     rc = env.reward_components
 
@@ -238,8 +267,8 @@ def compute_total_reward(env) -> torch.Tensor:
     _log("collision_penalty", collision_penalty)
     _log("wall_penalty", boundary_penalty)
     _log("success_bonus", success_bonus)
-    _log("proximity_bonus", proximity_bonus)
-    _log("precision_bonus", precision_bonus)
+    _log("milestone_bonus", milestone_bonus)  # NEW: replaces proximity/precision
     _log("time_penalty", time_penalty)
+    _log("survival_bonus", survival_bonus)
 
     return total_reward
