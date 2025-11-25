@@ -81,13 +81,21 @@ def get_entropy_coef(level: int) -> float:
     - Gradually lower entropy in later stages to refine behaviour.
     """
     if level <= 1:
-        return 0.08   # S0-S1: high exploration
+        return 0.08   # S0-S1: Initial learning
     elif level <= 3:
-        return 0.07   # S2-S3: still high
+        return 0.07   # S2-S3: Building basics
     elif level <= 7:
-        return 0.06   # S4-S7: maintain exploration for offsets ✅
+        return 0.06   # S4-S7: Refining approach
+    elif level == 8:
+        return 0.08   # S8: Hard jump, need HIGH exploration! ⭐
+    elif level <= 11:
+        return 0.07   # S9-S11: Large offsets, keep exploring
+    elif level <= 13:
+        return 0.07   # S12-S13: 180° turn = new skill
+    elif level == 14:
+        return 0.08   # S14: Arena search = totally new
     else:
-        return 0.04
+        return 0.06   # S15: Full autonomy (has some transfer)
 
 
 # =============================================================================

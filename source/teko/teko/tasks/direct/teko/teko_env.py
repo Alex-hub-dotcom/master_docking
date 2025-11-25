@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment - Curriculum Compatible (v8.2 FINAL)
-======================================================
+TEKO Environment - Curriculum Compatible (v8.3 ROBUST & SIMPLE)
+================================================================
 - Supports multi-stage curriculum
 - Nuclear penalties (-500 collision/boundary)
-- ONE-TIME MILESTONE BONUSES (anti-reward-hacking)
-- Milestone flag reset on episode end
 - Frame stacking: returns stacked RGB frames [3 * K, H, W]
+- Pure shaping + terminal rewards (no milestone system)
 
-CRITICAL v8.2 FIX: Milestone flags initialized in _reset_idx (NOT __init__)
-to avoid AttributeError on self.num_envs and self.device
+v8.3 Changes (PRODUCTION READY):
+- REMOVED milestone flag system (too complex, not needed)
+- SIMPLIFIED reward structure (alignment scale reduced in reward_functions.py)
+- Clean, maintainable code ready for overnight training
 
 This environment was created for the TEKO vision-based docking project.
 
@@ -41,7 +42,7 @@ from .robots.teko_static import TEKOStatic
 
 class TekoEnv(DirectRLEnv):
     """
-    Torque-driven TEKO environment with curriculum and milestone rewards.
+    Torque-driven TEKO environment with curriculum learning.
 
     This class connects:
     - the TEKO robot model,
@@ -50,10 +51,10 @@ class TekoEnv(DirectRLEnv):
     - and the reward / curriculum logic
     into a reinforcement learning environment.
     
-    v8.2 Features:
-    - One-time milestone bonuses (prevents reward farming)
-    - Milestone flag tracking and reset
-    - Exponential time penalty
+    v8.3 Features:
+    - Simplified reward structure (no milestone flags)
+    - Robust shaping rewards + terminal success bonus
+    - Ready for production training
     """
 
     cfg: TekoEnvCfg
@@ -97,10 +98,6 @@ class TekoEnv(DirectRLEnv):
         self.prev_actions = None
         self.step_count = None
 
-        # v8.2 CRITICAL: Milestone flags initialized in _reset_idx (NOT here!)
-        # Cannot initialize here because self.num_envs and self.device don't exist yet
-        self.milestone_flags = None
-
         # Episode statistics (for logging and analysis)
         self.episode_rewards = []
         self.episode_lengths = []
@@ -109,10 +106,12 @@ class TekoEnv(DirectRLEnv):
             "distance": [],
             "progress": [],
             "alignment": [],
-            "velocity_penalty": [],
-            "oscillation_penalty": [],
+            "facing_bonus": [],
+            "approach_bonus": [],
             "collision_penalty": [],
-            "wall_penalty": [],
+            "boundary_penalty": [],
+            "success_bonus": [],
+            "time_penalty": [],
         }
 
         # Call Isaac Lab base class constructor
@@ -548,14 +547,13 @@ class TekoEnv(DirectRLEnv):
         return terminated, time_out
 
     # ------------------------------------------------------------------
-    # Reset (WITH MILESTONE FLAG RESET - v8.2 CRITICAL)
+    # Reset (v8.3 - SIMPLIFIED)
     # ------------------------------------------------------------------
     def _reset_idx(self, env_ids):
         """
-        Reset environments and CLEAR MILESTONE FLAGS.
+        Reset environments to initial state.
         
-        v8.2 CRITICAL: This prevents milestone bonuses from carrying over
-        between episodes, which would allow reward farming.
+        v8.3: Simplified - no milestone flags to manage.
         """
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()
@@ -576,22 +574,6 @@ class TekoEnv(DirectRLEnv):
         # Reset frame stack
         if self.frame_counts is not None:
             self.frame_counts[env_ids] = 0
-
-        # ✅ v8.2 CRITICAL: Initialize milestone flags on first call
-        # This MUST be done here (not in __init__) because self.num_envs and 
-        # self.device don't exist until after super().__init__() completes
-        if self.milestone_flags is None:
-            self.milestone_flags = {
-                'entered_20cm': torch.zeros(num_envs, dtype=torch.bool, device=self.device),
-                'entered_10cm': torch.zeros(num_envs, dtype=torch.bool, device=self.device),
-                'entered_5cm': torch.zeros(num_envs, dtype=torch.bool, device=self.device),
-                'entered_2cm': torch.zeros(num_envs, dtype=torch.bool, device=self.device),
-            }
-
-        # ✅ v8.2 CRITICAL: Reset milestone flags for these environments
-        # This prevents milestone bonuses from carrying over between episodes
-        for key in self.milestone_flags:
-            self.milestone_flags[key][env_ids] = False
 
         # Curriculum-based spawn
         reset_environment_curriculum(self, env_ids)
