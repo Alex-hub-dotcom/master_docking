@@ -231,51 +231,51 @@ def _reset_stage3(env, env_ids: torch.Tensor) -> None:
     _base_forward_reset(env, env_ids, 0.20, 0.35, yaw)
 
 
-# Stage 4: Tiny Offset Close (20–30 cm, ±3°, ±3 cm)
+# Stage 4: Tiny Offset Close (20–30 cm, ±3°, ±3 cm) – **rotation first, tiny lateral**
 def _reset_stage4(env, env_ids: torch.Tensor) -> None:
     _offset_reset(
         env,
         env_ids,
         angle_deg=3.0,
-        lateral_m=0.03,
+        lateral_m=0.02,   # was 0.03 -> smaller lateral (2 cm)
         min_dist=0.20,
         max_dist=0.30,
     )
 
 
-# Stage 5: Tiny Offset Medium (20–40 cm, ±6°, ±5 cm)
+# Stage 5: Tiny Offset Medium (20–40 cm, ±6°, ±5 cm) – still mostly rotation
 def _reset_stage5(env, env_ids: torch.Tensor) -> None:
     _offset_reset(
         env,
         env_ids,
         angle_deg=6.0,
-        lateral_m=0.05,
+        lateral_m=0.03,   # was 0.05 -> smaller lateral (3 cm)
         min_dist=0.20,
-        max_dist=0.40,
+        max_dist=0.35,    # was 0.40 -> slightly easier
     )
 
 
-# Stage 6: Small Offset (20–40 cm, ±9°, ±7 cm)
+# Stage 6: Small Offset (20–40 cm, ±9°, ±7 cm) – yaw↑, lateral capped ~4 cm
 def _reset_stage6(env, env_ids: torch.Tensor) -> None:
     _offset_reset(
         env,
         env_ids,
         angle_deg=9.0,
-        lateral_m=0.07,
+        lateral_m=0.04,   # was 0.07 -> lateral <= 4 cm
         min_dist=0.20,
-        max_dist=0.40,
+        max_dist=0.35,    # was 0.40 -> slightly easier
     )
 
 
-# Stage 7: Small+ Offset (20–40 cm, ±12°, ±9 cm)
+# Stage 7: Small+ Offset (20–40 cm, ±12°, ±9 cm) – high yaw, still small lateral
 def _reset_stage7(env, env_ids: torch.Tensor) -> None:
     _offset_reset(
         env,
         env_ids,
         angle_deg=12.0,
-        lateral_m=0.09,
+        lateral_m=0.04,   # was 0.09 -> keep lateral <= 4 cm
         min_dist=0.20,
-        max_dist=0.40,
+        max_dist=0.35,    # was 0.40
     )
 
 
@@ -303,7 +303,7 @@ def _reset_stage9(env, env_ids: torch.Tensor) -> None:
     )
 
 
-# Stage 10: Large Offset (20–40 cm, ±21°, ±16 cm)
+# Stage 10: Large Offset (20–40 cm, ±21°, ±16 cm) – distance slightly reduced
 def _reset_stage10(env, env_ids: torch.Tensor) -> None:
     _offset_reset(
         env,
@@ -311,11 +311,11 @@ def _reset_stage10(env, env_ids: torch.Tensor) -> None:
         angle_deg=21.0,
         lateral_m=0.16,
         min_dist=0.20,
-        max_dist=0.40,
+        max_dist=0.35,   # was 0.40
     )
 
 
-# Stage 11: Large+ Offset (20–40 cm, ±24°, ±18 cm)
+# Stage 11: Large+ Offset (20–40 cm, ±24°, ±18 cm) – distance slightly reduced
 def _reset_stage11(env, env_ids: torch.Tensor) -> None:
     _offset_reset(
         env,
@@ -323,7 +323,7 @@ def _reset_stage11(env, env_ids: torch.Tensor) -> None:
         angle_deg=24.0,
         lateral_m=0.18,
         min_dist=0.20,
-        max_dist=0.40,
+        max_dist=0.35,   # was 0.40
     )
 
 
@@ -437,12 +437,6 @@ def _reset_stage15(env, env_ids: torch.Tensor) -> None:
 def set_curriculum_level(env, level: int) -> None:
     """
     Set the curriculum stage (0–15) on the environment and print a log line.
-
-    This is a *helper function* used by older training scripts and by tools
-    that want a simple way to bump the curriculum from Python.
-    Newer trainers may prefer to call `env.set_curriculum_level` if the
-    environment exposes such a method, but this function is kept for
-    backward compatibility and for imports in teko_env.py.
     """
     max_level = len(STAGE_NAMES) - 1
     level = max(0, min(max_level, int(level)))
@@ -456,14 +450,8 @@ def set_curriculum_level(env, level: int) -> None:
 def should_advance_curriculum(success_rate: float, current_level: int) -> bool:
     """
     Decide whether to advance to the next curriculum stage based on success rate.
-
-    The trainer additionally enforces a minimum number of steps per stage.
-    This helper is optional, but we keep it because some scripts might
-    still import it.
     """
     max_level = len(STAGE_NAMES) - 1
     if current_level >= max_level:
         return False
-
-    # Demand a high success rate for robustness
     return success_rate >= 0.85

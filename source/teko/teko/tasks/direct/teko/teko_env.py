@@ -106,7 +106,6 @@ class TekoEnv(DirectRLEnv):
             "distance": [],
             "progress": [],
             "alignment": [],
-            "facing_bonus": [],
             "approach_bonus": [],
             "collision_penalty": [],
             "boundary_penalty": [],

@@ -11,8 +11,8 @@ Features:
 - Strict success thresholds (no relaxation with time-in-stage)
 - Stage mixing before advancement
 - Overlapping curriculum stages fixed
-- 20% replay from previous stage (handled in curriculum_manager)
-- Stage-dependent entropy (more exploration in early / hard stages like S3)
+- 20–40% replay from previous stage (handled in curriculum_manager)
+- Stage-dependent entropy (more exploration in early / hard stages)
 - Clamped log_std to prevent entropy explosion
 - CPU-based rollout storage + GPU mini-batch PPO update
   -> works with frame stacking without blowing VRAM
@@ -41,14 +41,17 @@ HYPERPARAMS = {
     "gae_lambda": 0.95,
     "clip_ratio": 0.15,
     "value_clip": 0.2,
-    "entropy_coef": 0.05,   # base value (we override it with stage-dependent schedule)
+    "entropy_coef": 0.05,   # base value (overridden by stage-dependent schedule)
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
     "min_stage_steps": 15_000,
 }
 
-# Safety valve per stage (only kicks in if SSR never reaches threshold)
+# Safety valve per stage (only used if SSR never reaches threshold)
 MAX_STAGE_STEPS = 400_000
+
+# Checkpoint interval (in environment steps, across all envs)
+CHECKPOINT_INTERVAL = 10_000
 
 # Will be set inside main()
 args = None
@@ -77,25 +80,26 @@ def get_entropy_coef(level: int) -> float:
     Stage-dependent entropy coefficient.
 
     Idea:
-    - High exploration in early stages and around S3 (where things got sticky).
-    - Gradually lower entropy in later stages to refine behaviour.
+    - High exploration in early stages and around S3 (where learning can stall).
+    - Slightly higher entropy again on hard jumps (S8, S14).
+    - Lower entropy in later stages to refine behaviour.
     """
     if level <= 1:
-        return 0.08   # S0-S1: Initial learning
+        return 0.08   # S0–S1: Initial learning
     elif level <= 3:
-        return 0.07   # S2-S3: Building basics
+        return 0.07   # S2–S3: Building basics
     elif level <= 7:
-        return 0.06   # S4-S7: Refining approach
+        return 0.06   # S4–S7: Refining approach
     elif level == 8:
-        return 0.08   # S8: Hard jump, need HIGH exploration! ⭐
+        return 0.08   # S8: Hard offset jump, need more exploration
     elif level <= 11:
-        return 0.07   # S9-S11: Large offsets, keep exploring
+        return 0.07   # S9–S11: Large offsets
     elif level <= 13:
-        return 0.07   # S12-S13: 180° turn = new skill
+        return 0.07   # S12–S13: 180° turn
     elif level == 14:
-        return 0.08   # S14: Arena search = totally new
+        return 0.08   # S14: Arena search (new behaviour)
     else:
-        return 0.06   # S15: Full autonomy (has some transfer)
+        return 0.06   # S15: Full autonomy
 
 
 # =============================================================================
@@ -453,6 +457,7 @@ def main():
 
         start_step = 0
         steps_in_current_stage = 0
+        last_ckpt_step = 0
 
         # Optional checkpoint loading
         if args.checkpoint is not None:
@@ -464,6 +469,7 @@ def main():
             restored_level = ckpt.get("curriculum_level", 0)
             steps_in_current_stage = ckpt.get("steps_in_stage", 0)
             env.set_curriculum_level(restored_level)
+            last_ckpt_step = start_step
             print(f"Resumed: step {start_step}, stage {env.curriculum_level}")
 
         # Logging directory
@@ -494,231 +500,252 @@ def main():
         # ---------------------------------------------------------------------
         # Main training loop
         # ---------------------------------------------------------------------
-        while step < args.steps:
-            # Rollout buffers (CPU)
-            obs_buf, act_buf, rew_buf, val_buf, logp_buf, done_buf = [], [], [], [], [], []
+        try:
+            while step < args.steps:
+                # Rollout buffers (CPU)
+                obs_buf, act_buf, rew_buf, val_buf, logp_buf, done_buf = [], [], [], [], [], []
 
-            # Collect one rollout of length args.rollout_len
-            for _ in range(args.rollout_len):
+                # Collect one rollout of length args.rollout_len
+                for _ in range(args.rollout_len):
+                    with torch.no_grad():
+                        action, logp, value = policy.act(obs)
+
+                    obs_dict, reward, term, trunc, info = env.step(action)
+                    next_obs = obs_dict["rgb"].to(device)
+                    done = term | trunc
+
+                    # Update per-env episode stats (on device)
+                    current_episode_reward += reward
+                    current_episode_length += 1
+
+                    # If an episode ends, log stats into rolling windows
+                    for i in range(args.num_envs):
+                        if done[i]:
+                            episode_rewards.append(current_episode_reward[i].item())
+                            episode_lengths.append(current_episode_length[i].item())
+
+                            # Simple success heuristic based on big terminal reward
+                            success = reward[i] > 50.0
+                            episode_successes.append(1.0 if success else 0.0)
+                            stage_success_window.append(1.0 if success else 0.0)
+
+                            current_episode_reward[i] = 0.0
+                            current_episode_length[i] = 0
+
+                    # Store rollout data on CPU
+                    obs_buf.append(obs.cpu())
+                    act_buf.append(action.cpu())
+                    rew_buf.append(reward.cpu())
+                    val_buf.append(value.cpu())
+                    logp_buf.append(logp.cpu())
+                    done_buf.append(done.float().cpu())
+
+                    obs = next_obs
+                    step += args.num_envs
+                    steps_in_current_stage += args.num_envs
+
+                # Stack rollout into tensors on CPU
+                obs_t = torch.stack(obs_buf)       # [T, N, C, H, W]
+                act_t = torch.stack(act_buf)       # [T, N, 2]
+                rew_t = torch.stack(rew_buf)       # [T, N]
+                val_t = torch.stack(val_buf)       # [T, N]
+                logp_t = torch.stack(logp_buf)     # [T, N]
+                done_t = torch.stack(done_buf)     # [T, N]
+
+                # Statistics BEFORE update
+                mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
+                mean_length = float(np.mean(episode_lengths)) if episode_lengths else 0.0
+                success_rate = float(np.mean(episode_successes)) if episode_successes else 0.0
+                stage_success = float(np.mean(stage_success_window)) if stage_success_window else 0.0
+
+                current_stage = env.curriculum_level
+                stage_threshold = get_stage_threshold(current_stage)
+
+                # Stage-dependent entropy coefficient (strict thresholds stay the same)
+                entropy_coef_used = get_entropy_coef(current_stage)
+
+                # Compute GAE on CPU
                 with torch.no_grad():
-                    action, logp, value = policy.act(obs)
-
-                obs_dict, reward, term, trunc, info = env.step(action)
-                next_obs = obs_dict["rgb"].to(device)
-                done = term | trunc
-
-                # Update per-env episode stats (on device)
-                current_episode_reward += reward
-                current_episode_length += 1
-
-                # If an episode ends, log stats into rolling windows
-                for i in range(args.num_envs):
-                    if done[i]:
-                        episode_rewards.append(current_episode_reward[i].item())
-                        episode_lengths.append(current_episode_length[i].item())
-                        success = reward[i] > 50.0  # success heuristic
-                        episode_successes.append(1.0 if success else 0.0)
-                        stage_success_window.append(1.0 if success else 0.0)
-                        current_episode_reward[i] = 0.0
-                        current_episode_length[i] = 0
-
-                # Store rollout data on CPU
-                obs_buf.append(obs.cpu())
-                act_buf.append(action.cpu())
-                rew_buf.append(reward.cpu())
-                val_buf.append(value.cpu())
-                logp_buf.append(logp.cpu())
-                done_buf.append(done.float().cpu())
-
-                obs = next_obs
-                step += args.num_envs
-                steps_in_current_stage += args.num_envs
-
-            # Stack rollout into tensors on CPU
-            obs_t = torch.stack(obs_buf)       # [T, N, C, H, W]
-            act_t = torch.stack(act_buf)       # [T, N, 2]
-            rew_t = torch.stack(rew_buf)       # [T, N]
-            val_t = torch.stack(val_buf)       # [T, N]
-            logp_t = torch.stack(logp_buf)     # [T, N]
-            done_t = torch.stack(done_buf)     # [T, N]
-
-            # Stats BEFORE update
-            mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
-            mean_length = float(np.mean(episode_lengths)) if episode_lengths else 0.0
-            success_rate = float(np.mean(episode_successes)) if episode_successes else 0.0
-            stage_success = float(np.mean(stage_success_window)) if stage_success_window else 0.0
-
-            current_stage = env.curriculum_level
-            stage_threshold = get_stage_threshold(current_stage)
-
-            # Stage-dependent entropy coefficient (strict thresholds stay the same)
-            entropy_coef_used = get_entropy_coef(current_stage)
-
-            # Compute GAE on CPU
-            with torch.no_grad():
-                advantages, returns = compute_gae(
-                    rew_t, val_t, done_t,
-                    HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
-                )
-
-            # PPO update (rollout on CPU, mini-batches on GPU)
-            policy_loss, value_loss, entropy = ppo_update(
-                policy, optimizer,
-                obs_t, act_t, logp_t,
-                advantages, returns,
-                epochs=args.epochs, batch_size=args.batch_size,
-                clip_ratio=HYPERPARAMS["clip_ratio"],
-                value_clip=HYPERPARAMS["value_clip"],
-                entropy_coef=entropy_coef_used,
-                value_coef=HYPERPARAMS["value_coef"],
-                max_grad_norm=HYPERPARAMS["max_grad_norm"],
-            )
-
-            # TensorBoard logging - Enhanced
-            writer.add_scalar("train/reward", mean_reward, step)
-            writer.add_scalar("train/episode_length", mean_length, step)
-            writer.add_scalar("train/success_rate", success_rate, step)
-            writer.add_scalar("train/stage_success", stage_success, step)
-            writer.add_scalar("train/curriculum_stage", current_stage, step)
-            writer.add_scalar("train/stage_threshold", stage_threshold, step)
-            writer.add_scalar("train/policy_loss", policy_loss, step)
-            writer.add_scalar("train/value_loss", value_loss, step)
-            writer.add_scalar("train/entropy", entropy, step)
-            writer.add_scalar("train/steps_in_stage", steps_in_current_stage, step)
-            writer.add_scalar("train/log_std_v", policy.log_std[0].item(), step)
-            writer.add_scalar("train/log_std_w", policy.log_std[1].item(), step)
-            writer.add_scalar("train/entropy_coef_used", entropy_coef_used, step)
-
-            # Detailed reward component logging
-            if hasattr(env, 'reward_components') and env.reward_components:
-                for comp_name, comp_values in env.reward_components.items():
-                    if comp_values:
-                        mean_val = float(np.mean(comp_values))
-                        writer.add_scalar(f"rewards/{comp_name}", mean_val, step)
-                for key in env.reward_components:
-                    env.reward_components[key].clear()
-
-            # Action statistics
-            writer.add_scalar("train/action_v_mean", env.actions[:, 0].mean().item(), step)
-            writer.add_scalar("train/action_w_mean", env.actions[:, 1].mean().item(), step)
-            writer.add_scalar("train/action_v_std", env.actions[:, 0].std().item(), step)
-            writer.add_scalar("train/action_w_std", env.actions[:, 1].std().item(), step)
-
-            # Distance statistics
-            _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
-            writer.add_scalar("train/min_distance", surface_xy.min().item(), step)
-            writer.add_scalar("train/mean_distance", surface_xy.mean().item(), step)
-
-            # CNN feature health check (every 1000 steps)
-            if step % 1000 == 0:
-                with torch.no_grad():
-                    sample_obs = obs[:min(4, obs.shape[0])]
-                    features = policy.encoder(sample_obs)
-                    writer.add_scalar("train/feature_mean", features.mean().item(), step)
-                    writer.add_scalar("train/feature_std", features.std().item(), step)
-                    writer.add_scalar("train/feature_max", features.abs().max().item(), step)
-
-            print(
-                f"[{step:7d}] S{current_stage:02d} | "
-                f"R={mean_reward:6.1f} | Len={mean_length:4.0f} | "
-                f"SR={success_rate * 100:4.1f}% | SSR={stage_success * 100:4.1f}% | "
-                f"Thr={stage_threshold * 100:4.1f}% | Steps={steps_in_current_stage:6d} | "
-                f"EntCoef={entropy_coef_used:.3f}"
-            )
-
-            # ------------------------------
-            # Curriculum advancement logic
-            # ------------------------------
-            if steps_in_current_stage >= HYPERPARAMS["min_stage_steps"]:
-                advance = False
-                enough_episodes = len(stage_success_window) >= 50
-
-                if enough_episodes and stage_success >= stage_threshold:
-                    advance = True
-                    print(f"✓ Stage {current_stage} mastered! (SSR={stage_success:.1%})")
-                elif steps_in_current_stage >= MAX_STAGE_STEPS:
-                    advance = True
-                    print(
-                        f"⚠ Safety valve: advancing from S{current_stage} "
-                        f"after {steps_in_current_stage:,} steps (SSR={stage_success:.1%})"
+                    advantages, returns = compute_gae(
+                        rew_t, val_t, done_t,
+                        HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
                     )
 
-                if advance and current_stage < len(STAGE_NAMES) - 1:
-                    print(f"🔄 Mixing stages {current_stage} and {current_stage + 1}...")
+                # PPO update (rollout on CPU, mini-batches on GPU)
+                policy_loss, value_loss, entropy = ppo_update(
+                    policy, optimizer,
+                    obs_t, act_t, logp_t,
+                    advantages, returns,
+                    epochs=args.epochs, batch_size=args.batch_size,
+                    clip_ratio=HYPERPARAMS["clip_ratio"],
+                    value_clip=HYPERPARAMS["value_clip"],
+                    entropy_coef=entropy_coef_used,
+                    value_coef=HYPERPARAMS["value_coef"],
+                    max_grad_norm=HYPERPARAMS["max_grad_norm"],
+                )
 
-                    # Shorter rollout for mixing to save time and memory
-                    MIX_ROLLOUT_LEN = 16
+                # TensorBoard logging
+                writer.add_scalar("train/reward", mean_reward, step)
+                writer.add_scalar("train/episode_length", mean_length, step)
+                writer.add_scalar("train/success_rate", success_rate, step)
+                writer.add_scalar("train/stage_success", stage_success, step)
+                writer.add_scalar("train/curriculum_stage", current_stage, step)
+                writer.add_scalar("train/stage_threshold", stage_threshold, step)
+                writer.add_scalar("train/policy_loss", policy_loss, step)
+                writer.add_scalar("train/value_loss", value_loss, step)
+                writer.add_scalar("train/entropy", entropy, step)
+                writer.add_scalar("train/steps_in_stage", steps_in_current_stage, step)
+                writer.add_scalar("train/log_std_v", policy.log_std[0].item(), step)
+                writer.add_scalar("train/log_std_w", policy.log_std[1].item(), step)
+                writer.add_scalar("train/entropy_coef_used", entropy_coef_used, step)
 
-                    for mix_iter in range(50):
-                        if mix_iter % 2 == 0:
-                            env.set_curriculum_level(current_stage)
-                        else:
-                            env.set_curriculum_level(current_stage + 1)
+                # Detailed reward component logging
+                if hasattr(env, 'reward_components') and env.reward_components:
+                    for comp_name, comp_values in env.reward_components.items():
+                        if comp_values:
+                            mean_val = float(np.mean(comp_values))
+                            writer.add_scalar(f"rewards/{comp_name}", mean_val, step)
+                    for key in env.reward_components:
+                        env.reward_components[key].clear()
 
-                        obs_t2, act_t2, rew_t2, val_t2, logp_t2, done_t2 = do_training_step(
-                            env, policy, device, rollout_len=MIX_ROLLOUT_LEN
+                # Action statistics
+                writer.add_scalar("train/action_v_mean", env.actions[:, 0].mean().item(), step)
+                writer.add_scalar("train/action_w_mean", env.actions[:, 1].mean().item(), step)
+                writer.add_scalar("train/action_v_std", env.actions[:, 0].std().item(), step)
+                writer.add_scalar("train/action_w_std", env.actions[:, 1].std().item(), step)
+
+                # Distance statistics
+                _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
+                writer.add_scalar("train/min_distance", surface_xy.min().item(), step)
+                writer.add_scalar("train/mean_distance", surface_xy.mean().item(), step)
+
+                # CNN feature health check (every 1000 env-steps)
+                if step % 1000 == 0:
+                    with torch.no_grad():
+                        sample_obs = obs[:min(4, obs.shape[0])]
+                        features = policy.encoder(sample_obs)
+                        writer.add_scalar("train/feature_mean", features.mean().item(), step)
+                        writer.add_scalar("train/feature_std", features.std().item(), step)
+                        writer.add_scalar("train/feature_max", features.abs().max().item(), step)
+
+                print(
+                    f"[{step:7d}] S{current_stage:02d} | "
+                    f"R={mean_reward:6.1f} | Len={mean_length:4.0f} | "
+                    f"SR={success_rate * 100:4.1f}% | SSR={stage_success * 100:4.1f}% | "
+                    f"Thr={stage_threshold * 100:4.1f}% | Steps={steps_in_current_stage:6d} | "
+                    f"EntCoef={entropy_coef_used:.3f}"
+                )
+
+                # ------------------------------
+                # Curriculum advancement logic
+                # ------------------------------
+                if steps_in_current_stage >= HYPERPARAMS["min_stage_steps"]:
+                    advance = False
+                    enough_episodes = len(stage_success_window) >= 50
+
+                    if enough_episodes and stage_success >= stage_threshold:
+                        advance = True
+                        print(f"✓ Stage {current_stage} mastered! (SSR={stage_success:.1%})")
+                    elif steps_in_current_stage >= MAX_STAGE_STEPS:
+                        advance = True
+                        print(
+                            f"⚠ Safety valve: advancing from S{current_stage} "
+                            f"after {steps_in_current_stage:,} steps (SSR={stage_success:.1%})"
                         )
 
-                        with torch.no_grad():
-                            adv2, ret2 = compute_gae(
-                                rew_t2, val_t2, done_t2,
-                                HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
+                    if advance and current_stage < len(STAGE_NAMES) - 1:
+                        print(f"🔄 Mixing stages {current_stage} and {current_stage + 1}...")
+
+                        # Shorter rollout for mixing to save time and memory
+                        MIX_ROLLOUT_LEN = 16
+
+                        for mix_iter in range(50):
+                            if mix_iter % 2 == 0:
+                                env.set_curriculum_level(current_stage)
+                            else:
+                                env.set_curriculum_level(current_stage + 1)
+
+                            obs_t2, act_t2, rew_t2, val_t2, logp_t2, done_t2 = do_training_step(
+                                env, policy, device, rollout_len=MIX_ROLLOUT_LEN
                             )
 
-                        # PPO update for mixing (still CPU rollout, GPU mini-batch)
-                        mix_entropy_coef = get_entropy_coef(env.curriculum_level)
-                        ppo_update(
-                            policy, optimizer,
-                            obs_t2, act_t2, logp_t2,
-                            adv2, ret2,
-                            epochs=args.epochs, batch_size=args.batch_size,
-                            clip_ratio=HYPERPARAMS["clip_ratio"],
-                            value_clip=HYPERPARAMS["value_clip"],
-                            entropy_coef=mix_entropy_coef,
-                            value_coef=HYPERPARAMS["value_coef"],
-                            max_grad_norm=HYPERPARAMS["max_grad_norm"],
-                        )
+                            with torch.no_grad():
+                                adv2, ret2 = compute_gae(
+                                    rew_t2, val_t2, done_t2,
+                                    HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
+                                )
 
-                    print(f"➡️  Advancing to Stage {current_stage + 1}")
-                    env.set_curriculum_level(current_stage + 1)
-                    stage_success_window.clear()
-                    steps_in_current_stage = 0
+                            # PPO update for mixing (still CPU rollout, GPU mini-batch)
+                            mix_entropy_coef = get_entropy_coef(env.curriculum_level)
+                            ppo_update(
+                                policy, optimizer,
+                                obs_t2, act_t2, logp_t2,
+                                adv2, ret2,
+                                epochs=args.epochs, batch_size=args.batch_size,
+                                clip_ratio=HYPERPARAMS["clip_ratio"],
+                                value_clip=HYPERPARAMS["value_clip"],
+                                entropy_coef=mix_entropy_coef,
+                                value_coef=HYPERPARAMS["value_coef"],
+                                max_grad_norm=HYPERPARAMS["max_grad_norm"],
+                            )
 
-            # ------------------------------
-            # Checkpointing
-            # ------------------------------
-            if step % 50_000 == 0 and step > start_step:
-                ckpt_path = f"{log_dir}/ckpt_{step}.pt"
-                torch.save(
-                    {
-                        "policy": policy.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "step": step,
-                        "curriculum_level": env.curriculum_level,
-                        "steps_in_stage": steps_in_current_stage,
-                    },
-                    ckpt_path,
-                )
-                print(f"💾 Checkpoint: {ckpt_path}")
+                        print(f"➡️  Advancing to Stage {current_stage + 1}")
+                        env.set_curriculum_level(current_stage + 1)
+                        stage_success_window.clear()
+                        steps_in_current_stage = 0
 
-        # Final save
-        final_path = f"{log_dir}/final.pt"
-        torch.save(
-            {
-                "policy": policy.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "step": step,
-                "curriculum_level": env.curriculum_level,
-                "steps_in_stage": steps_in_current_stage,
-            },
-            final_path,
-        )
+                # ------------------------------
+                # Checkpointing (robust)
+                # ------------------------------
+                if step - last_ckpt_step >= CHECKPOINT_INTERVAL:
+                    ckpt_path = f"{log_dir}/ckpt_{step}.pt"
+                    torch.save(
+                        {
+                            "policy": policy.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "step": step,
+                            "curriculum_level": env.curriculum_level,
+                            "steps_in_stage": steps_in_current_stage,
+                        },
+                        ckpt_path,
+                    )
+                    last_ckpt_step = step
+                    print(f"💾 Checkpoint: {ckpt_path}")
 
-        print("\n" + "=" * 70)
-        print("✅ TRAINING COMPLETE!")
-        print(f"Final stage: {STAGE_NAMES[env.curriculum_level]}")
-        print(f"💾 Model: {final_path}")
-        print("=" * 70 + "\n")
+        except KeyboardInterrupt:
+            # Emergency save on manual interrupt
+            print("\n⏹ Training interrupted by user. Saving emergency checkpoint...")
+            interrupt_path = f"{log_dir}/interrupt_{step}.pt"
+            torch.save(
+                {
+                    "policy": policy.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "step": step,
+                    "curriculum_level": env.curriculum_level,
+                    "steps_in_stage": steps_in_current_stage,
+                },
+                interrupt_path,
+            )
+            print(f"💾 Emergency checkpoint: {interrupt_path}")
+        else:
+            # Final save only if we reached the target number of steps
+            final_path = f"{log_dir}/final.pt"
+            torch.save(
+                {
+                    "policy": policy.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "step": step,
+                    "curriculum_level": env.curriculum_level,
+                    "steps_in_stage": steps_in_current_stage,
+                },
+                final_path,
+            )
+
+            print("\n" + "=" * 70)
+            print("✅ TRAINING COMPLETE!")
+            print(f"Final stage: {STAGE_NAMES[env.curriculum_level]}")
+            print(f"💾 Model: {final_path}")
+            print("=" * 70 + "\n")
 
     finally:
         if writer is not None:
