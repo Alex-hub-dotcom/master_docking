@@ -1,22 +1,47 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward functions for TEKO (v8.6 – OFFSET-FRIENDLY ALIGNMENT & APPROACH)
------------------------------------------------------------------------
+Reward functions for TEKO (v8.8 – TURN-FIRST CURRICULUM)
+--------------------------------------------------------
 
-v8.6 Changes (FOCUSED ON STAGES 8–11):
-- Alignment reward is now stronger when the robot is FAR from the dock
-  and weaker when it is NEAR:
-    * far (surface_xy > 0.15 m):  0.3 × (1 - error)
-    * near (surface_xy ≤ 0.15 m): 0.05 × (1 - error)
-- Approach bonus is slightly more permissive:
-    * yaw error < 30°
-    * distance < 0.40 m
-    * scaled as 2.0 × progress
+v8.8 Changes (CRITICAL FIX FOR STAGES 4–11):
 
-Goal:
-- Encourage the robot to first rotate towards the docking target when
-  spawned with large angular/lateral offsets (Stages 8–11),
-  without reintroducing reward hacking via hovering.
+The core problem: In previous versions, the robot learned "back up straight"
+in S0-S3 and this strategy fails in S4+ where lateral correction is needed.
+The reward structure punished turning (temporary distance increase) more than
+it rewarded alignment, so the robot refused to turn.
+
+Key changes in v8.8:
+
+1. NO DISTANCE PENALTY WHEN FAR (>0.20m):
+   - When far, distance_reward = 0 (not negative)
+   - Robot can freely maneuver without being punished
+
+2. PROGRESS REWARD GATED BY ALIGNMENT:
+   - Progress reward only activates when yaw error < 45°
+   - When misaligned, progress = 0 (no reward or penalty for distance changes)
+   - This forces the robot to align FIRST, then approach
+
+3. STRONGER ALIGNMENT REWARD WHEN FAR:
+   - Far (>0.20m): alignment_reward = 0.5 × (1 - error)
+   - Near (≤0.20m): alignment_reward = 0.1 × (1 - error)
+
+4. EXPLICIT TURNING BONUS:
+   - When misaligned (yaw_error > 20°) AND turning toward goal: +0.3
+   - Directly rewards the turning behavior we want
+
+5. APPROACH BONUS UNCHANGED:
+   - Still rewards approaching when aligned and close
+
+Reward structure (9 components):
+1. Distance shaping:     0 when far, -2.0×dist when near
+2. Progress reward:      only when aligned (yaw < 45°)
+3. Alignment shaping:    stronger when far
+4. Turning bonus:        NEW - rewards turning toward goal when misaligned
+5. Approach bonus:       extra reward when approaching + aligned + close
+6. Collision penalty:    -100 (terminal)
+7. Boundary penalty:     -500 (terminal)
+8. Success bonus:        +400 (terminal)
+9. Time penalty:         small increasing penalty
 """
 
 from __future__ import annotations
@@ -31,25 +56,12 @@ def _angle_wrap(angle: torch.Tensor) -> torch.Tensor:
 
 def compute_total_reward(env) -> torch.Tensor:
     """
-    Compute total reward for the TEKO docking task (v8.6).
-
-    Reward structure (8 components):
-    1. Distance shaping:        -2.0 × surface_xy
-    2. Progress reward:        +10.0 × progress (main dense signal)
-    3. Alignment shaping:   0.3 / 0.05 × (1 - normalized yaw error)
-       - stronger when far from the dock, weaker near the dock
-    4. Approach bonus:          +2.0 × progress
-       - only when approaching, reasonably aligned, and within 0.40 m
-    5. Collision penalty:      -100 (terminal)
-    6. Boundary penalty:       -500 (terminal)
-    7. Success bonus:          +400 (terminal, dominant positive event)
-    8. Time penalty:    small negative term increasing with episode length
+    Compute total reward for the TEKO docking task (v8.8 - TURN-FIRST).
     """
     device = env.device
-    num_envs = env.scene.cfg.num_envs  # kept for clarity, not strictly required
 
     # ------------------------------------------------------------------
-    # 0. Distances between connector spheres
+    # 0. Distances and yaw error (used by multiple components)
     # ------------------------------------------------------------------
     _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
 
@@ -57,26 +69,7 @@ def compute_total_reward(env) -> torch.Tensor:
     if env.prev_distance is None:
         env.prev_distance = surface_xy.clone()
 
-    # ------------------------------------------------------------------
-    # 1. Distance reward (shaping)
-    # ------------------------------------------------------------------
-    distance_reward = -2.0 * surface_xy
-    distance_reward = torch.clamp(distance_reward, min=-10.0, max=0.0)
-
-    # ------------------------------------------------------------------
-    # 2. Progress reward (main dense signal)
-    # ------------------------------------------------------------------
-    progress = env.prev_distance - surface_xy
-    progress_reward = 10.0 * progress
-    progress_reward = torch.clamp(progress_reward, min=-4.0, max=4.0)
-
-    # Update for next step
-    env.prev_distance = surface_xy.clone()
-
-    # ------------------------------------------------------------------
-    # 3. Alignment reward (offset-friendly)
-    # ------------------------------------------------------------------
-    # Extract robot yaw from quaternion
+    # Compute yaw error (how misaligned is the robot?)
     robot_quat = env.robot.data.root_quat_w
     robot_pos = env.robot.data.root_pos_w
     goal_pos = env.goal_positions
@@ -95,38 +88,95 @@ def compute_total_reward(env) -> torch.Tensor:
     vec_to_goal = goal_pos - robot_pos
     goal_yaw = torch.atan2(vec_to_goal[:, 1], vec_to_goal[:, 0])
 
-    # We want the rear of the robot (camera side) to face the goal
+    # We want the REAR of the robot (camera side) to face the goal
     rear_yaw = robot_yaw + torch.pi
     yaw_error = _angle_wrap(rear_yaw - goal_yaw)
+    yaw_error_abs = torch.abs(yaw_error)
 
     # Normalized yaw error in [0, 1]
-    normalized_error = torch.abs(yaw_error) / torch.pi
+    normalized_yaw_error = yaw_error_abs / torch.pi
 
-    # Stronger alignment shaping when far, weaker when near
-    far_mask = surface_xy > 0.15
-    near_mask = ~far_mask
+    # Distance thresholds
+    FAR_THRESHOLD = 0.12  # meters - lowered so early stages aren't penalized
+    is_far = surface_xy > FAR_THRESHOLD
+    is_near = ~is_far
 
-    alignment_far = 0.3 * (1.0 - normalized_error)
-    alignment_near = 0.05 * (1.0 - normalized_error)
-
-    alignment_reward = torch.where(far_mask, alignment_far, alignment_near)
+    # Alignment thresholds
+    ALIGNED_THRESHOLD = np.deg2rad(45.0)  # 45 degrees
+    MISALIGNED_THRESHOLD = np.deg2rad(20.0)  # 20 degrees
+    is_aligned = yaw_error_abs < ALIGNED_THRESHOLD
+    is_misaligned = yaw_error_abs > MISALIGNED_THRESHOLD
 
     # ------------------------------------------------------------------
-    # 4. Approach bonus (slightly relaxed conditions)
+    # 1. Distance reward – ZERO WHEN FAR, gentle shaping when near
     # ------------------------------------------------------------------
-    well_aligned = torch.abs(yaw_error) < np.deg2rad(30.0)  # was 20°
-    close_enough = surface_xy < 0.40                        # was 0.30 m
+    # When far: no penalty, robot can maneuver freely
+    # When near: gentle penalty (was -2.0, now -0.5)
+    distance_reward = torch.where(
+        is_far,
+        torch.zeros_like(surface_xy),      # no penalty when far
+        -0.5 * surface_xy,                  # GENTLE shaping when near
+    )
+    distance_reward = torch.clamp(distance_reward, min=-2.0, max=0.0)
 
-    approaching = (progress > 0.0) & well_aligned & close_enough
+    # ------------------------------------------------------------------
+    # 2. Progress reward – ONLY WHEN ALIGNED
+    # ------------------------------------------------------------------
+    progress = env.prev_distance - surface_xy
 
-    approach_bonus = torch.where(
-        approaching,
-        2.0 * progress,  # was 3.0 × progress
-        torch.tensor(0.0, device=device),
+    # Only give progress reward when reasonably aligned
+    # This forces the robot to turn first, THEN approach
+    progress_reward = torch.where(
+        is_aligned,
+        10.0 * progress,                    # full progress reward when aligned
+        torch.zeros_like(progress),         # no progress signal when misaligned
+    )
+    progress_reward = torch.clamp(progress_reward, min=-4.0, max=4.0)
+
+    # Update prev_distance AFTER using it
+    env.prev_distance = surface_xy.clone()
+
+    # ------------------------------------------------------------------
+    # 3. Alignment reward – STRONGER WHEN FAR
+    # ------------------------------------------------------------------
+    alignment_far = 0.5 * (1.0 - normalized_yaw_error)   # was 0.3
+    alignment_near = 0.1 * (1.0 - normalized_yaw_error)  # was 0.05
+
+    alignment_reward = torch.where(is_far, alignment_far, alignment_near)
+
+    # ------------------------------------------------------------------
+    # 4. TURNING BONUS – NEW: explicitly reward turning toward goal
+    # ------------------------------------------------------------------
+    # Get angular velocity (yaw rate)
+    ang_vel = env.robot.data.root_ang_vel_w  # [N, 3]
+    yaw_rate = ang_vel[:, 2]  # z-component is yaw rate
+
+    # Check if turning in the correct direction
+    # If yaw_error > 0, need to turn negative (and vice versa)
+    turning_correct_direction = (yaw_error * yaw_rate) < 0
+
+    # Turning bonus: reward when misaligned AND turning toward goal
+    turning_bonus = torch.where(
+        is_misaligned & turning_correct_direction & is_far,
+        torch.full_like(surface_xy, 0.3),   # bonus for correct turning
+        torch.zeros_like(surface_xy),
     )
 
     # ------------------------------------------------------------------
-    # 5. Collision penalty (terminal)
+    # 5. Approach bonus (when approaching + aligned + close)
+    # ------------------------------------------------------------------
+    well_aligned = yaw_error_abs < np.deg2rad(30.0)
+    close_enough = surface_xy < 0.40
+    approaching = progress > 0.0
+
+    approach_bonus = torch.where(
+        approaching & well_aligned & close_enough,
+        2.0 * progress,
+        torch.zeros_like(progress),
+    )
+
+    # ------------------------------------------------------------------
+    # 6. Collision penalty (terminal)
     # ------------------------------------------------------------------
     raw_success = surface_xy < 0.03
 
@@ -149,7 +199,6 @@ def compute_total_reward(env) -> torch.Tensor:
     lin_vel = env.robot.data.root_lin_vel_w
     speed = torch.norm(lin_vel[:, :2], dim=-1)
 
-    # Align collision condition with _get_dones (min_collision_steps)
     min_collision_steps = 10
     ep_len = env.episode_length_buf
 
@@ -162,12 +211,12 @@ def compute_total_reward(env) -> torch.Tensor:
 
     collision_penalty = torch.where(
         collision,
-        torch.tensor(-100.0, device=device),
-        torch.tensor(0.0, device=device),
+        torch.full_like(surface_xy, -100.0),
+        torch.zeros_like(surface_xy),
     )
 
     # ------------------------------------------------------------------
-    # 6. Boundary penalty (terminal)
+    # 7. Boundary penalty (terminal)
     # ------------------------------------------------------------------
     env_origins = env.scene.env_origins
     robot_pos_local = robot_pos_global - env_origins
@@ -182,29 +231,28 @@ def compute_total_reward(env) -> torch.Tensor:
 
     boundary_penalty = torch.where(
         out_of_bounds,
-        torch.tensor(-500.0, device=device),
-        torch.tensor(0.0, device=device),
+        torch.full_like(surface_xy, -500.0),
+        torch.zeros_like(surface_xy),
     )
 
     # ------------------------------------------------------------------
-    # 7. Success bonus (terminal)
+    # 8. Success bonus (terminal)
     # ------------------------------------------------------------------
     min_success_steps = 5
     terminal_success = raw_success & (ep_len >= min_success_steps)
 
     success_bonus = torch.where(
         terminal_success,
-        torch.tensor(400.0, device=device),
-        torch.tensor(0.0, device=device),
+        torch.full_like(surface_xy, 400.0),
+        torch.zeros_like(surface_xy),
     )
 
     # ------------------------------------------------------------------
-    # 8. Time penalty (encourage efficient docking)
+    # 9. Time penalty (encourage efficient docking)
     # ------------------------------------------------------------------
     max_ep_len = float(env.max_episode_length)
     length_ratio = ep_len.float() / max_ep_len
 
-    # Exponential growth with episode length, normalized to keep values small
     exp_factor = torch.exp(4.0 * length_ratio) - 1.0
     exp_factor = exp_factor / 54.0
 
@@ -218,6 +266,7 @@ def compute_total_reward(env) -> torch.Tensor:
         distance_reward
         + progress_reward
         + alignment_reward
+        + turning_bonus
         + approach_bonus
         + collision_penalty
         + boundary_penalty
@@ -225,10 +274,10 @@ def compute_total_reward(env) -> torch.Tensor:
         + time_penalty
     )
 
-    total_reward = torch.clamp(total_reward, min=-400.0, max=400.0)
+    total_reward = torch.clamp(total_reward, min=-500.0, max=500.0)
 
     # ------------------------------------------------------------------
-    # Logging of reward components (for analysis)
+    # Logging
     # ------------------------------------------------------------------
     rc = env.reward_components
 
@@ -240,6 +289,7 @@ def compute_total_reward(env) -> torch.Tensor:
     _log("distance", distance_reward)
     _log("progress", progress_reward)
     _log("alignment", alignment_reward)
+    _log("turning_bonus", turning_bonus)
     _log("approach_bonus", approach_bonus)
     _log("collision_penalty", collision_penalty)
     _log("boundary_penalty", boundary_penalty)
