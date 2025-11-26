@@ -65,15 +65,17 @@ args = None
 
 
 def get_stage_threshold(level: int) -> float:
-    """Strict success-rate thresholds per curriculum stage."""
+    """Success-rate thresholds per curriculum stage (v3 micro-steps)."""
     if level <= 0:
         return 0.80
     elif level <= 4:
-        return 0.70
-    elif level <= 9:
-        return 0.60
+        return 0.75
+    elif level <= 6:
+        return 0.70  # S5-S6: these work at 70%
+    elif level <= 11:
+        return 0.65  # S7-S11: micro-steps, slightly lower
     else:
-        return 0.50
+        return 0.60  # S12-S15: harder stages
 
 
 def get_entropy_coef(level: int) -> float:
