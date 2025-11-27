@@ -73,7 +73,7 @@ def get_stage_threshold(level: int) -> float:
     elif level <= 6:
         return 0.70  # S5-S6: these work at 70%
     elif level <= 11:
-        return 0.65  # S7-S11: micro-steps, slightly lower
+        return 0.60  # S7-S11: micro-steps, slightly lower
     else:
         return 0.60  # S12-S15: harder stages
 
@@ -92,16 +92,16 @@ def get_entropy_coef(level: int) -> float:
         return 0.07   # S4-S5: First offsets - need exploration for BOTH directions
     elif level <= 7:
         return 0.07   # S6-S7: More offsets
-    elif level == 8:
-        return 0.08   # S8: Harder offsets
+    elif level <= 9:
+        return 0.075   # S8: Harder offsets
     elif level <= 11:
-        return 0.07   # S9-S11: Large offsets
+        return 0.08   # S9-S11: Large offsets
     elif level <= 13:
-        return 0.08   # S12-S13: 180° turn - new behavior
+        return 0.09  # S12-S13: 180° turn - new behavior
     elif level == 14:
-        return 0.08   # S14: Arena search - new behavior
+        return 0.09   # S14: Arena search - new behavior
     else:
-        return 0.05   # S15: Final stage, exploit
+        return 0.07   # S15: Final stage, exploit
 
 
 # =============================================================================
