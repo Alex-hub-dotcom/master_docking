@@ -1,304 +1,305 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-12-STAGE ULTRA-GRADUAL CURRICULUM FOR TEKO
-===========================================
-Stage 0:  Baby Steps        (0.05-0.15m, 0°, 0cm)
-Stage 1:  Close Forward     (0.15-0.30m, 0°, 0cm)
-Stage 2:  Medium Forward    (0.30-0.50m, 0°, 0cm)
-Stage 3:  Tiny Offset       (0.30-0.50m, ±3°, ±3cm)
-Stage 4:  Small Offset      (0.30-0.50m, ±6°, ±6cm)
-Stage 5:  Medium Offset     (0.30-0.50m, ±10°, ±10cm)
-Stage 6:  Large Offset      (0.30-0.50m, ±15°, ±15cm)
-Stage 7:  Full Lateral      (0.30-0.50m, ±20°, ±20cm)
-Stage 8:  180° Close        (0.30-0.50m, 180°, 0cm)
-Stage 9:  180° Offset       (0.30-0.50m, 180°±10°, ±10cm)
-Stage 10: Arena Search      (0.80-1.50m, random yaw)
-Stage 11: Full Autonomy     (random position, random yaw)
+23-STAGE CURRICULUM FOR TEKO (v6.0 - FIXED S13 PLATEAU)
+========================================================
 
-Advances at 85% success rate, minimum 15k steps per stage
+v6.0 Changes:
+- Added S12.5 (now S13) to fix the S12→S13 jump problem
+- S12: ±18°, ±4cm → S13: ±20°, ±4cm (only yaw) → S14: ±20°, ±6cm (only lateral)
+- Total: 23 stages (S0-S22)
+- Extended to 180° turn capability
+
+Key insight: Never increase YAW and LATERAL simultaneously!
 """
 
-import torch
+from __future__ import annotations
+
 import numpy as np
+import torch
+
 from ..utils.geometry_utils import yaw_to_quat
 
-
+# Descriptive names for console logging (23 stages)
 STAGE_NAMES = [
-    "Stage 0: Baby Steps (5-15cm)",
-    "Stage 1: Close Forward (15-30cm)",
-    "Stage 2: Medium Forward (30-50cm)",
-    "Stage 3: Tiny Offset (±3°, ±3cm)",
-    "Stage 4: Small Offset (±6°, ±6cm)",
-    "Stage 5: Medium Offset (±10°, ±10cm)",
-    "Stage 6: Large Offset (±15°, ±15cm)",
-    "Stage 7: Full Lateral (±20°, ±20cm)",
-    "Stage 8: 180° Close (turn around)",
-    "Stage 9: 180° Offset (turn + align)",
-    "Stage 10: Arena Search (far + random)",
-    "Stage 11: Full Autonomy (production)"
+    "Stage 0:  Baby Steps (5–12 cm, forward)",
+    "Stage 1:  Forward 1 (10–18 cm, forward)",
+    "Stage 2:  Forward 2 (15–25 cm, forward)",
+    "Stage 3:  Medium Forward (20–35 cm, forward)",
+    "Stage 4:  Tiny Offset (20–30 cm, ±3°, ±2 cm)",
+    "Stage 5:  Small Offset (20–35 cm, ±6°, ±3 cm)",
+    "Stage 6:  Offset (20–35 cm, ±9°, ±3 cm)",
+    "Stage 7:  Offset (20–35 cm, ±10°, ±3 cm)",
+    "Stage 8:  Offset (20–35 cm, ±11°, ±3 cm)",
+    "Stage 9:  Offset (20–35 cm, ±12°, ±3 cm)",
+    "Stage 10: Offset (20–35 cm, ±14°, ±3 cm)",
+    "Stage 11: Offset (20–35 cm, ±16°, ±3 cm)",
+    "Stage 12: Offset (20–35 cm, ±18°, ±4 cm)",
+    "Stage 13: Offset (20–35 cm, ±20°, ±4 cm)",      # NEW: only yaw increase
+    "Stage 14: Offset (20–35 cm, ±20°, ±6 cm)",      # NEW: only lateral increase
+    "Stage 15: Offset (20–35 cm, ±24°, ±6 cm)",
+    "Stage 16: Offset (20–35 cm, ±30°, ±9 cm)",
+    # Extended stages for 180° turn
+    "Stage 17: Large Angle (20–40 cm, ±45°, ±8 cm)",
+    "Stage 18: Large Angle (20–40 cm, ±60°, ±6 cm)",
+    "Stage 19: Perpendicular (20–40 cm, ±90°, ±5 cm)",
+    "Stage 20: Rear Angle (25–45 cm, ±120°, ±4 cm)",
+    "Stage 21: Rear Angle (25–45 cm, ±150°, ±3 cm)",
+    "Stage 22: Full Turn (30–50 cm, ±180°, ±3 cm)",
 ]
 
 
-def reset_environment_curriculum(env, env_ids):
-    """Reset robot according to current curriculum stage."""
-    stage = env.curriculum_level
-    
-    if stage == 0:
-        _reset_stage0(env, env_ids)
-    elif stage == 1:
-        _reset_stage1(env, env_ids)
-    elif stage == 2:
-        _reset_stage2(env, env_ids)
-    elif stage == 3:
-        _reset_stage3(env, env_ids)
-    elif stage == 4:
-        _reset_stage4(env, env_ids)
-    elif stage == 5:
-        _reset_stage5(env, env_ids)
-    elif stage == 6:
-        _reset_stage6(env, env_ids)
-    elif stage == 7:
-        _reset_stage7(env, env_ids)
-    elif stage == 8:
-        _reset_stage8(env, env_ids)
-    elif stage == 9:
-        _reset_stage9(env, env_ids)
-    elif stage == 10:
-        _reset_stage10(env, env_ids)
-    else:  # stage == 11
-        _reset_stage11(env, env_ids)
-
-
 # =============================================================================
-# STAGE 0: Baby Steps (0.05-0.15m, 0°, 0cm)
+# Dispatcher
 # =============================================================================
-def _reset_stage0(env, env_ids):
-    """Super close, perfect alignment - just breathe forward."""
+
+def reset_environment_curriculum(env, env_ids: torch.Tensor) -> None:
+    """Reset environments according to the current curriculum stage."""
+    current_stage = int(env.curriculum_level)
     num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.10 + 0.05  # 5-15cm
-    yaw = torch.ones(num, device=env.device) * np.pi        # 180° (facing goal)
+
+    if current_stage == 0:
+        _reset_stage_dispatch(env, env_ids, current_stage)
+        return
+
+    device = env.device
+
+    # Stage-dependent replay probability
+    if current_stage >= 17:
+        mix_prob = 0.40  # Higher replay for 180° stages
+    elif current_stage >= 13:
+        mix_prob = 0.35  # Higher replay for advanced offset stages
+    elif current_stage >= 7:
+        mix_prob = 0.25
+    else:
+        mix_prob = 0.20
+
+    mix_prev = torch.rand(num, device=device) < mix_prob
+
+    prev_ids = env_ids[mix_prev]
+    curr_ids = env_ids[~mix_prev]
+
+    if len(prev_ids) > 0:
+        _reset_stage_dispatch(env, prev_ids, current_stage - 1)
+
+    if len(curr_ids) > 0:
+        _reset_stage_dispatch(env, curr_ids, current_stage)
+
+
+def _reset_stage_dispatch(env, env_ids: torch.Tensor, stage: int) -> None:
+    """Route to the correct reset function."""
+    reset_functions = [
+        _reset_stage0, _reset_stage1, _reset_stage2, _reset_stage3,
+        _reset_stage4, _reset_stage5, _reset_stage6, _reset_stage7,
+        _reset_stage8, _reset_stage9, _reset_stage10, _reset_stage11,
+        _reset_stage12, _reset_stage13, _reset_stage14, _reset_stage15,
+        _reset_stage16, _reset_stage17, _reset_stage18, _reset_stage19,
+        _reset_stage20, _reset_stage21, _reset_stage22,
+    ]
     
+    if 0 <= stage < len(reset_functions):
+        reset_functions[stage](env, env_ids)
+    else:
+        raise ValueError(f"Invalid curriculum stage: {stage}")
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _base_forward_reset(
+    env,
+    env_ids: torch.Tensor,
+    min_dist: float,
+    max_dist: float,
+    yaw: torch.Tensor,
+) -> None:
+    """Helper for pure forward docking stages."""
+    num = len(env_ids)
+    device = env.device
+
+    dist = torch.rand(num, device=device) * (max_dist - min_dist) + min_dist
+
     x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1]                       # No offset
-    z = torch.ones(num, device=env.device) * 0.40
-    
+    y = env.goal_positions[env_ids, 1]
+    z = torch.ones(num, device=device) * 0.40
+
+    pos = torch.stack([x, y, z], dim=1)
+    quat = yaw_to_quat(yaw)
+    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+
+
+def _offset_reset(
+    env,
+    env_ids: torch.Tensor,
+    angle_deg: float,
+    lateral_m: float,
+    min_dist: float,
+    max_dist: float,
+) -> None:
+    """Helper for offset stages."""
+    num = len(env_ids)
+    device = env.device
+
+    dist = torch.rand(num, device=device) * (max_dist - min_dist) + min_dist
+    max_yaw = np.deg2rad(angle_deg)
+
+    yaw = np.pi + (torch.rand(num, device=device) * (2 * max_yaw) - max_yaw)
+
+    x = env.goal_positions[env_ids, 0] - dist
+    y = env.goal_positions[env_ids, 1] + (
+        torch.rand(num, device=device) * (2 * lateral_m) - lateral_m
+    )
+    z = torch.ones(num, device=device) * 0.40
+
     pos = torch.stack([x, y, z], dim=1)
     quat = yaw_to_quat(yaw)
     env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
 
 
 # =============================================================================
-# STAGE 1: Close Forward (0.15-0.30m, 0°, 0cm)
+# S0-S3: Forward stages (unchanged)
 # =============================================================================
-def _reset_stage1(env, env_ids):
-    """Close range, perfect alignment - learn gentle approach."""
+
+def _reset_stage0(env, env_ids: torch.Tensor) -> None:
     num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.15 + 0.15  # 15-30cm
     yaw = torch.ones(num, device=env.device) * np.pi
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1]
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+    _base_forward_reset(env, env_ids, 0.05, 0.12, yaw)
 
 
-# =============================================================================
-# STAGE 2: Medium Forward (0.30-0.50m, 0°, 0cm)
-# =============================================================================
-def _reset_stage2(env, env_ids):
-    """Medium distance, perfect alignment - speed control."""
+def _reset_stage1(env, env_ids: torch.Tensor) -> None:
     num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30  # 30-50cm
     yaw = torch.ones(num, device=env.device) * np.pi
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1]
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+    _base_forward_reset(env, env_ids, 0.10, 0.18, yaw)
 
 
-# =============================================================================
-# STAGE 3: Tiny Offset (0.30-0.50m, ±3°, ±3cm)
-# =============================================================================
-def _reset_stage3(env, env_ids):
-    """First misalignment - tiny offset and rotation."""
+def _reset_stage2(env, env_ids: torch.Tensor) -> None:
     num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = np.pi + (torch.rand(num, device=env.device) * 0.105 - 0.0525)  # ±3° = ±0.0524 rad
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.06 - 0.03)  # ±3cm
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+    yaw = torch.ones(num, device=env.device) * np.pi
+    _base_forward_reset(env, env_ids, 0.15, 0.25, yaw)
 
 
-# =============================================================================
-# STAGE 4: Small Offset (0.30-0.50m, ±6°, ±6cm)
-# =============================================================================
-def _reset_stage4(env, env_ids):
-    """Small misalignment - learn basic steering."""
+def _reset_stage3(env, env_ids: torch.Tensor) -> None:
     num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = np.pi + (torch.rand(num, device=env.device) * 0.21 - 0.105)  # ±6° = ±0.105 rad
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.12 - 0.06)  # ±6cm
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+    yaw = torch.ones(num, device=env.device) * np.pi
+    _base_forward_reset(env, env_ids, 0.20, 0.35, yaw)
 
 
 # =============================================================================
-# STAGE 5: Medium Offset (0.30-0.50m, ±10°, ±10cm)
+# S4-S12: Offset stages (unchanged - these work!)
 # =============================================================================
-def _reset_stage5(env, env_ids):
-    """Medium misalignment - moderate corrections."""
-    num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = np.pi + (torch.rand(num, device=env.device) * 0.35 - 0.175)  # ±10° = ±0.175 rad
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.20 - 0.10)  # ±10cm
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+
+def _reset_stage4(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=3.0, lateral_m=0.02, min_dist=0.20, max_dist=0.30)
+
+
+def _reset_stage5(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=6.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage6(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=9.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage7(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=10.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage8(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=11.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage9(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=12.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage10(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=14.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage11(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=16.0, lateral_m=0.03, min_dist=0.20, max_dist=0.35)
+
+
+def _reset_stage12(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=18.0, lateral_m=0.04, min_dist=0.20, max_dist=0.35)
 
 
 # =============================================================================
-# STAGE 6: Large Offset (0.30-0.50m, ±15°, ±15cm)
+# S13-S16: FIXED - Never increase yaw AND lateral simultaneously!
 # =============================================================================
-def _reset_stage6(env, env_ids):
-    """Large misalignment - aggressive corrections."""
-    num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = np.pi + (torch.rand(num, device=env.device) * 0.524 - 0.262)  # ±15° = ±0.262 rad
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.30 - 0.15)  # ±15cm
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+
+# S13: ±20°, ±4cm (only +2° yaw, lateral stays at 4cm)
+def _reset_stage13(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=20.0, lateral_m=0.04, min_dist=0.20, max_dist=0.35)
+
+
+# S14: ±20°, ±6cm (yaw stays at 20°, only +2cm lateral)
+def _reset_stage14(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=20.0, lateral_m=0.06, min_dist=0.20, max_dist=0.35)
+
+
+# S15: ±24°, ±6cm (only +4° yaw)
+def _reset_stage15(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=24.0, lateral_m=0.06, min_dist=0.20, max_dist=0.35)
+
+
+# S16: ±30°, ±9cm (offset mastery - can increase both here, robot is stronger)
+def _reset_stage16(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=30.0, lateral_m=0.09, min_dist=0.20, max_dist=0.35)
 
 
 # =============================================================================
-# STAGE 7: Full Lateral (0.30-0.50m, ±20°, ±20cm)
+# S17-S22: Extended stages for 180° turn
 # =============================================================================
-def _reset_stage7(env, env_ids):
-    """Maximum lateral challenge - master alignment."""
-    num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = np.pi + (torch.rand(num, device=env.device) * 0.698 - 0.349)  # ±20° = ±0.349 rad
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.40 - 0.20)  # ±20cm
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+
+# S17: ±45°, ±8cm
+def _reset_stage17(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=45.0, lateral_m=0.08, min_dist=0.20, max_dist=0.40)
+
+
+# S18: ±60°, ±6cm
+def _reset_stage18(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=60.0, lateral_m=0.06, min_dist=0.20, max_dist=0.40)
+
+
+# S19: ±90°, ±5cm (perpendicular - robot starts sideways)
+def _reset_stage19(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=90.0, lateral_m=0.05, min_dist=0.20, max_dist=0.40)
+
+
+# S20: ±120°, ±4cm (robot starts facing partially away)
+def _reset_stage20(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=120.0, lateral_m=0.04, min_dist=0.25, max_dist=0.45)
+
+
+# S21: ±150°, ±3cm (robot starts almost backwards)
+def _reset_stage21(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=150.0, lateral_m=0.03, min_dist=0.25, max_dist=0.45)
+
+
+# S22: ±180°, ±3cm (full turn - robot starts facing completely away)
+def _reset_stage22(env, env_ids: torch.Tensor) -> None:
+    _offset_reset(env, env_ids, angle_deg=180.0, lateral_m=0.03, min_dist=0.30, max_dist=0.50)
 
 
 # =============================================================================
-# STAGE 8: 180° Close (0.30-0.50m, 180°, 0cm)
+# Curriculum control
 # =============================================================================
-def _reset_stage8(env, env_ids):
-    """Facing AWAY - learn to turn around and dock."""
-    num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = torch.zeros(num, device=env.device)  # 0° = facing away!
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1]
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
 
+def set_curriculum_level(env, level: int) -> None:
+    """Set the curriculum stage (0–22) on the environment."""
+    max_level = len(STAGE_NAMES) - 1
+    level = max(0, min(max_level, int(level)))
+    env.curriculum_level = level
 
-# =============================================================================
-# STAGE 9: 180° Offset (0.30-0.50m, 180°±10°, ±10cm)
-# =============================================================================
-def _reset_stage9(env, env_ids):
-    """Facing away + misaligned - turn and align."""
-    num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.20 + 0.30
-    yaw = (torch.rand(num, device=env.device) * 0.35 - 0.175)  # 0° ± 10°
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.20 - 0.10)
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
-
-
-# =============================================================================
-# STAGE 10: Arena Search (0.80-1.50m, random yaw)
-# =============================================================================
-def _reset_stage10(env, env_ids):
-    """Far away, random orientation - search and approach."""
-    num = len(env_ids)
-    dist = torch.rand(num, device=env.device) * 0.70 + 0.80  # 80-150cm
-    yaw = torch.rand(num, device=env.device) * 2 * np.pi
-    
-    x = env.goal_positions[env_ids, 0] - dist
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 0.60 - 0.30)
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
-
-
-# =============================================================================
-# STAGE 11: Full Autonomy (random position, random yaw)
-# =============================================================================
-def _reset_stage11(env, env_ids):
-    """Production mode - anywhere in arena."""
-    num = len(env_ids)
-    
-    # Random position in 3m x 5m arena
-    x = env.goal_positions[env_ids, 0] + (torch.rand(num, device=env.device) * 2.6 - 1.3)
-    y = env.goal_positions[env_ids, 1] + (torch.rand(num, device=env.device) * 4.6 - 2.3)
-    z = torch.ones(num, device=env.device) * 0.40
-    
-    yaw = torch.rand(num, device=env.device) * 2 * np.pi
-    
-    pos = torch.stack([x, y, z], dim=1)
-    quat = yaw_to_quat(yaw)
-    env.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
-
-
-# =============================================================================
-# Curriculum Control
-# =============================================================================
-def set_curriculum_level(env, level: int):
-    """Set curriculum stage (0-11)."""
-    env.curriculum_level = max(0, min(11, level))
-    print(f"\n{'='*70}")
-    print(f"[CURRICULUM] {STAGE_NAMES[env.curriculum_level]}")
-    print(f"{'='*70}\n")
+    print(f"\n{'=' * 70}")
+    print(f"[CURRICULUM] {STAGE_NAMES[level]}")
+    print(f"{'=' * 70}\n")
 
 
 def should_advance_curriculum(success_rate: float, current_level: int) -> bool:
-    """Check if should advance (85% success threshold)."""
-    if current_level >= 11:
+    """Decide whether to advance to the next curriculum stage."""
+    max_level = len(STAGE_NAMES) - 1
+    if current_level >= max_level:
         return False
     return success_rate >= 0.85
