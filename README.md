@@ -1,5 +1,8 @@
 # TEKO Vision-Based Docking System
 
+# ATTENTION, THIS IS NOT THE FINAL README FILE!! 
+
+
 This repository is part of the master's thesis project  
 **"Adaptive Cooperation in Agricultural Robot Swarms: Reinforcement Learning and Evolutionary Algorithms for Modular Docking"**.
 
