@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-24-STAGE CURRICULUM FOR TEKO (v7.0 - STRICT MICRO-STEPS)
-=========================================================
+28-STAGE CURRICULUM FOR TEKO (v8.0 - ULTRA MICRO-STEPS)
+========================================================
 
 GOLDEN RULE: Never increase YAW and LATERAL simultaneously!
+EXTRA RULE: Maximum +1cm lateral or +2° yaw per stage!
 
-v7.0 - Fixes the S13 plateau by strictly separating yaw and lateral increases.
+v8.0 - Fixes S14 plateau by adding intermediate steps.
 
-Progression S12-S17:
-- S12: ±18°, ±4cm (mastered)
-- S13: ±20°, ±4cm (only +2° yaw)
-- S14: ±20°, ±6cm (only +2cm lateral)
-- S15: ±24°, ±6cm (only +4° yaw)
-- S16: ±24°, ±9cm (only +3cm lateral)
-- S17: ±30°, ±9cm (only +6° yaw)
-- S18: ±30°, ±12cm (only +3cm lateral) - offset mastery complete
-
-Then 180° stages S19-S23 with decreasing lateral (focus on turning).
+Key changes from v7:
+- S14 now +1cm lateral (not +2cm)
+- Added more intermediate stages
+- Total 28 stages (S0-S27)
 """
 
 from __future__ import annotations
@@ -36,26 +31,30 @@ STAGE_NAMES = [
     "Stage 4:  Tiny Offset (±3°, ±2 cm)",
     "Stage 5:  Small Offset (±6°, ±3 cm)",
     "Stage 6:  Offset (±9°, ±3 cm)",
-    # Micro-steps S7-S12 (these work!)
+    # Micro-steps S7-S12 (proven to work)
     "Stage 7:  Offset (±10°, ±3 cm)",
     "Stage 8:  Offset (±11°, ±3 cm)",
     "Stage 9:  Offset (±12°, ±3 cm)",
     "Stage 10: Offset (±14°, ±3 cm)",
     "Stage 11: Offset (±16°, ±3 cm)",
     "Stage 12: Offset (±18°, ±4 cm)",
-    # STRICT micro-steps S13-S18 (alternating yaw/lateral)
-    "Stage 13: Offset (±20°, ±4 cm)",   # +2° yaw only
-    "Stage 14: Offset (±20°, ±6 cm)",   # +2cm lateral only
-    "Stage 15: Offset (±24°, ±6 cm)",   # +4° yaw only
-    "Stage 16: Offset (±24°, ±9 cm)",   # +3cm lateral only
-    "Stage 17: Offset (±30°, ±9 cm)",   # +6° yaw only
-    "Stage 18: Offset (±30°, ±12 cm)",  # +3cm lateral only - OFFSET MASTERY
-    # 180° turn stages S19-S23 (lateral decreases, yaw increases)
-    "Stage 19: Large Angle (±45°, ±10 cm)",
-    "Stage 20: Large Angle (±60°, ±8 cm)",
-    "Stage 21: Perpendicular (±90°, ±6 cm)",
-    "Stage 22: Rear Angle (±135°, ±4 cm)",
-    "Stage 23: Full Turn (±180°, ±3 cm)",
+    # ULTRA micro-steps S13-S22 (max +2° yaw OR +1cm lateral per stage)
+    "Stage 13: Offset (±20°, ±4 cm)",   # +2° yaw
+    "Stage 14: Offset (±20°, ±5 cm)",   # +1cm lateral
+    "Stage 15: Offset (±20°, ±6 cm)",   # +1cm lateral
+    "Stage 16: Offset (±22°, ±6 cm)",   # +2° yaw
+    "Stage 17: Offset (±24°, ±6 cm)",   # +2° yaw
+    "Stage 18: Offset (±24°, ±7 cm)",   # +1cm lateral
+    "Stage 19: Offset (±24°, ±8 cm)",   # +1cm lateral
+    "Stage 20: Offset (±27°, ±8 cm)",   # +3° yaw
+    "Stage 21: Offset (±30°, ±8 cm)",   # +3° yaw
+    "Stage 22: Offset (±30°, ±10 cm)",  # +2cm lateral - OFFSET MASTERY
+    # 180° turn stages S23-S27
+    "Stage 23: Large Angle (±45°, ±8 cm)",
+    "Stage 24: Large Angle (±60°, ±6 cm)",
+    "Stage 25: Perpendicular (±90°, ±5 cm)",
+    "Stage 26: Rear Angle (±135°, ±4 cm)",
+    "Stage 27: Full Turn (±180°, ±3 cm)",
 ]
 
 
@@ -71,7 +70,7 @@ def reset_environment_curriculum(env, env_ids: torch.Tensor) -> None:
     device = env.device
 
     # Conservative replay probability
-    if current_stage >= 19:
+    if current_stage >= 23:
         mix_prob = 0.30  # 180° stages
     elif current_stage >= 13:
         mix_prob = 0.25  # Advanced offset stages
@@ -95,9 +94,6 @@ def _reset_stage_dispatch(env, env_ids: torch.Tensor, stage: int) -> None:
     if stage < 0 or stage >= len(STAGE_NAMES):
         raise ValueError(f"Invalid stage: {stage}")
     
-    # Use a list of (angle_deg, lateral_m, min_dist, max_dist) for offset stages
-    # Forward stages handled separately
-    
     if stage <= 3:
         # Forward stages
         forward_configs = [
@@ -111,28 +107,34 @@ def _reset_stage_dispatch(env, env_ids: torch.Tensor, stage: int) -> None:
     else:
         # Offset stages - (angle_deg, lateral_m, min_dist, max_dist)
         offset_configs = {
+            # First offsets
             4:  (3.0,  0.02, 0.20, 0.30),
             5:  (6.0,  0.03, 0.20, 0.35),
             6:  (9.0,  0.03, 0.20, 0.35),
+            # Proven micro-steps
             7:  (10.0, 0.03, 0.20, 0.35),
             8:  (11.0, 0.03, 0.20, 0.35),
             9:  (12.0, 0.03, 0.20, 0.35),
             10: (14.0, 0.03, 0.20, 0.35),
             11: (16.0, 0.03, 0.20, 0.35),
             12: (18.0, 0.04, 0.20, 0.35),
-            # STRICT alternating increases
-            13: (20.0, 0.04, 0.20, 0.35),  # +2° yaw only
-            14: (20.0, 0.06, 0.20, 0.35),  # +2cm lateral only
-            15: (24.0, 0.06, 0.20, 0.35),  # +4° yaw only
-            16: (24.0, 0.09, 0.20, 0.35),  # +3cm lateral only
-            17: (30.0, 0.09, 0.20, 0.35),  # +6° yaw only
-            18: (30.0, 0.12, 0.20, 0.35),  # +3cm lateral only
+            # ULTRA micro-steps (max +2° yaw OR +1cm lateral)
+            13: (20.0, 0.04, 0.20, 0.35),  # +2° yaw
+            14: (20.0, 0.05, 0.20, 0.35),  # +1cm lateral
+            15: (20.0, 0.06, 0.20, 0.35),  # +1cm lateral
+            16: (22.0, 0.06, 0.20, 0.35),  # +2° yaw
+            17: (24.0, 0.06, 0.20, 0.35),  # +2° yaw
+            18: (24.0, 0.07, 0.20, 0.35),  # +1cm lateral
+            19: (24.0, 0.08, 0.20, 0.35),  # +1cm lateral
+            20: (27.0, 0.08, 0.20, 0.35),  # +3° yaw
+            21: (30.0, 0.08, 0.20, 0.35),  # +3° yaw
+            22: (30.0, 0.10, 0.20, 0.35),  # +2cm lateral - OFFSET MASTERY
             # 180° stages
-            19: (45.0,  0.10, 0.20, 0.40),
-            20: (60.0,  0.08, 0.20, 0.40),
-            21: (90.0,  0.06, 0.20, 0.40),
-            22: (135.0, 0.04, 0.25, 0.45),
-            23: (180.0, 0.03, 0.30, 0.50),
+            23: (45.0,  0.08, 0.20, 0.40),
+            24: (60.0,  0.06, 0.20, 0.40),
+            25: (90.0,  0.05, 0.20, 0.40),
+            26: (135.0, 0.04, 0.25, 0.45),
+            27: (180.0, 0.03, 0.30, 0.50),
         }
         angle, lateral, min_d, max_d = offset_configs[stage]
         _offset_reset(env, env_ids, angle, lateral, min_d, max_d)
@@ -181,7 +183,7 @@ def _offset_reset(
 
 
 def set_curriculum_level(env, level: int) -> None:
-    """Set curriculum stage (0-23)."""
+    """Set curriculum stage (0-27)."""
     max_level = len(STAGE_NAMES) - 1
     level = max(0, min(max_level, int(level)))
     env.curriculum_level = level

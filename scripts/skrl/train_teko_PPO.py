@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-TEKO - 24-STAGE CURRICULUM TRAINING (v7.0 - STABLE)
-====================================================
+TEKO - 28-STAGE CURRICULUM TRAINING (v8.0 - ULTRA MICRO-STEPS)
+===============================================================
 
-v7.0: Simple and stable configuration.
-- 24 stages (S0-S23)
-- Strict micro-steps: never increase yaw AND lateral simultaneously
-- Conservative rehearsal (always enabled)
-- Tuned entropy based on empirical testing
+v8.0: Ultra micro-steps for guaranteed convergence.
+- 28 stages (S0-S27)
+- Max +2° yaw OR +1cm lateral per stage
+- Never increase both simultaneously
 
 Usage:
     python train_teko_PPO.py --num_envs 16 --steps 100000000 --headless
@@ -66,19 +65,21 @@ def get_stage_threshold(level: int) -> float:
         return 0.70
     elif level <= 12:
         return 0.60
-    elif level <= 18:
-        return 0.58  # Advanced offset
+    elif level <= 22:
+        return 0.58  # Advanced offset (ultra micro-steps)
     else:
         return 0.55  # 180° turns
 
 
 def get_entropy_coef(level: int) -> float:
     if level <= 6:
-        return 0.05   # S0-S6: tudo baixo
+        return 0.05   # S0-S6: low
     elif level <= 12:
         return 0.06   # S7-S12: micro-steps
+    elif level <= 22:
+        return 0.05   # S13-S22: ultra micro-steps
     else:
-        return 0.05   # S13+: refinamento
+        return 0.05   # S23+: 180° turns
 
 # =============================================================================
 # PPO Functions
@@ -193,7 +194,7 @@ def main():
     args.enable_cameras = True
 
     print("\n" + "=" * 70)
-    print("🎓 TEKO - 24-STAGE CURRICULUM (v7.0 - STABLE)")
+    print("🎓 TEKO - 28-STAGE CURRICULUM (v8.0 - ULTRA MICRO-STEPS)")
     print("=" * 70)
     print(f"Envs: {args.num_envs} | Steps: {args.steps:,} | LR: {args.lr}")
     print("=" * 70 + "\n")
