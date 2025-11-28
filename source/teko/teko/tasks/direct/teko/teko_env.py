@@ -144,25 +144,29 @@ class TekoEnv(DirectRLEnv):
         self._setup_cameras()
         self._cache_goal_transforms()
 
-    def _init_observation_space(self):
-        """Define the observation space (here: stacked RGB images)."""
-        import gymnasium as gym
+        def _init_observation_space(self):
+            """Define the observation space (a stack of K grayscale frames)."""
+            import gymnasium as gym
 
-        num_channels = 3 * self.num_frame_stack
-        frame_shape = (num_channels, self.cfg.camera.height, self.cfg.camera.width)
-        self.observation_space = gym.spaces.Dict(
-            {
-                "rgb": gym.spaces.Box(
-                    low=0.0,
-                    high=1.0,
-                    shape=frame_shape,
-                    dtype=np.float32,
-                )
-            }
-        )
-        print(
-            f"[INFO] Observation space set to {frame_shape} (frame stack K={self.num_frame_stack}), range [0, 1]"
-        )
+            # Agora é GRAYSCALE: 1 canal por frame → num_channels = K
+            num_channels = self.num_frame_stack          # ex: 4
+            frame_shape = (num_channels, self.cfg.camera.height, self.cfg.camera.width)
+
+            self.observation_space = gym.spaces.Dict(
+                {
+                    "rgb": gym.spaces.Box(
+                        low=0.0,
+                        high=1.0,
+                        shape=frame_shape,
+                        dtype=np.float32,
+                    )
+                }
+            )
+            print(
+                f"[INFO] Observation space set to {frame_shape} "
+                f"(K={self.num_frame_stack} grayscale frames), range [0, 1]"
+            )
+
 
     def _setup_global_lighting(self, stage):
         """Simple dome + sun lighting to make the scene visible on camera."""
@@ -426,15 +430,16 @@ class TekoEnv(DirectRLEnv):
     # Observations (with frame stacking)
     # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
-        """Capture RGB images and return stacked observations."""
+        """Capture RGB images, convert to grayscale, and return stacked observations."""
         import torch.nn.functional as F
 
         num_envs = self.scene.cfg.num_envs
         h, w = self._cam_res[1], self._cam_res[0]
 
+        # GRAYSCALE: frame_stack shape is [num_envs, K, 1, H, W]
         if self.frame_stack is None:
             self.frame_stack = torch.zeros(
-                (num_envs, self.num_frame_stack, 3, h, w),
+                (num_envs, self.num_frame_stack, 1, h, w),  # 1 channel (grayscale)
                 device=self.device, dtype=torch.float32,
             )
         if self.frame_counts is None:
@@ -442,7 +447,7 @@ class TekoEnv(DirectRLEnv):
                 num_envs, device=self.device, dtype=torch.int32
             )
 
-        rgb_current = torch.zeros((num_envs, 3, h, w), device=self.device)
+        gray_current = torch.zeros((num_envs, 1, h, w), device=self.device)
 
         for env_idx, cam in enumerate(self.cameras):
             cam.update(dt=0.0)
@@ -463,23 +468,26 @@ class TekoEnv(DirectRLEnv):
                     mode="bilinear", align_corners=False
                 ).squeeze(0)
 
-            rgb_current[env_idx] = rgb
+            # CONVERT RGB TO GRAYSCALE
+            gray = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+            gray = gray.unsqueeze(0)  # [1, H, W]
+            gray_current[env_idx] = gray
 
         reset_mask = self.frame_counts == 0
         if reset_mask.any():
             idx = reset_mask.nonzero(as_tuple=False).squeeze(-1)
-            self.frame_stack[idx, :, :, :, :] = rgb_current[idx].unsqueeze(1)
+            self.frame_stack[idx, :, :, :, :] = gray_current[idx].unsqueeze(1)
             self.frame_counts[idx] = self.num_frame_stack
 
         non_reset_mask = ~reset_mask
         if non_reset_mask.any():
             idx = non_reset_mask.nonzero(as_tuple=False).squeeze(-1)
             self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
-            self.frame_stack[idx, -1] = rgb_current[idx]
+            self.frame_stack[idx, -1] = gray_current[idx]
 
-        stacked_rgb = self.frame_stack.view(num_envs, 3 * self.num_frame_stack, h, w)
-        return {"rgb": stacked_rgb}
-
+        # Output: [num_envs, 4, 64, 64] (4 grayscale frames)
+        stacked = self.frame_stack.squeeze(2)  # Remove the channel dim: [N, K, 1, H, W] -> [N, K, H, W]
+        return {"rgb": stacked}
     # ------------------------------------------------------------------
     # Rewards
     # ------------------------------------------------------------------

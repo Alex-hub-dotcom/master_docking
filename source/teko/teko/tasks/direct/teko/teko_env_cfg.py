@@ -118,8 +118,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
             "/World/envs/env_.*/Robot/teko_urdf/TEKO_Body/"
             "TEKO_WallBack/TEKO_Camera/RearCamera"
         )
-        width = 640
-        height = 480
+        width = 64
+        height = 64
         frequency_hz = 15
         focal_length = 3.6
         horiz_aperture = 4.8
@@ -150,7 +150,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # Action space is 2D: [v, w] = [forward/back, turn], each in [-1, 1].
     action_space = (2,)
     observation_space = {
-        "rgb": (3, 480, 640),
+    "rgb": (4, 64, 64),     # 4 grayscale frames (stack): [K=4, H=64, W=64]
     }
 
     # ------------------------------------------------------------------
