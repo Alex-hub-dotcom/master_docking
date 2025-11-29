@@ -38,11 +38,11 @@ HYPERPARAMS = {
     "value_clip": 0.2,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
-    "min_stage_steps": 15_000,
+    "min_stage_steps": 50_000,
 }
 
-MAX_STAGE_STEPS = 400_000
-CHECKPOINT_INTERVAL = 10_000
+MAX_STAGE_STEPS = 1000_000
+CHECKPOINT_INTERVAL = 30_000
 
 # Rehearsal: always enabled, conservative settings
 REHEARSAL_ENABLED = True
