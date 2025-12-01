@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-CNN Feature Extractor for TEKO Docking (v9.2 - GRAYSCALE 64x64)
+CNN Feature Extractor for TEKO Docking (v9.2 - GRAYSCALE 128x128)
 --------------------------------------------------------------
-- Input: 4 grayscale frames [B, 4, 64, 64]
+- Input: 4 grayscale frames [B, 4, 128, 128]
 - Dynamic flatten size detection (no assumptions about resolution)
 - Very lightweight for 32–64 parallel envs
 
@@ -16,7 +16,7 @@ import torch.nn as nn
 class SimpleCNN(nn.Module):
     """Lightweight CNN for TEKO grayscale docking input."""
 
-    def __init__(self, feature_dim=256, num_frame_stack=4, input_h=64, input_w=64):
+    def __init__(self, feature_dim=256, num_frame_stack=4, input_h=128, input_w=128):
         super().__init__()
 
         self.num_frame_stack = num_frame_stack
@@ -66,8 +66,8 @@ def create_visual_encoder(
     feature_dim=256, 
     pretrained=False,
     num_frame_stack=4,
-    input_h=64,
-    input_w=64,
+    input_h=128,
+    input_w=128,
 ):
     """Factory function for the TEKO CNN encoder."""
     return SimpleCNN(
