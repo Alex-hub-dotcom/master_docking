@@ -5,7 +5,6 @@ TEKO Environment Configuration (Torque-driven, Modular)
 Optimized for:
 - 84×84 grayscale observations (4-frame stack)
 - 60 parallel environments
-- New PPO + CNN 84px pipeline
 
 Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
 """
@@ -59,7 +58,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     )
 
     # ------------------------------------------------------------------
-    # Scene (UPDATED: num_envs = 60)
+    # Scene
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=60,
@@ -94,7 +93,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
     # ------------------------------------------------------------------
-    # Camera Configuration (UPDATED TO 84×84)
+    # Camera Configuration (84×84)
     # ------------------------------------------------------------------
     @configclass
     class CameraCfg:
@@ -105,7 +104,6 @@ class TekoEnvCfg(DirectRLEnvCfg):
             "TEKO_WallBack/TEKO_Camera/RearCamera"
         )
 
-        # RESOLUTION UPDATED: 84×84
         width = 84
         height = 84
 
@@ -116,7 +114,6 @@ class TekoEnvCfg(DirectRLEnvCfg):
         f_stop = 16.0
         focus_distance = 2.0
 
-        # IMPORTANT: tell wrapper to convert to grayscale
         grayscale = True
 
     camera = CameraCfg()
@@ -137,18 +134,10 @@ class TekoEnvCfg(DirectRLEnvCfg):
     goal = GoalCfg()
 
     # ------------------------------------------------------------------
-    # Observation and Action Spaces (UPDATED)
+    # Observation and Action Spaces
     # ------------------------------------------------------------------
     action_space = (2,)
 
-    # OBSERVATION: 4 grayscale frames at 84×84
     observation_space = {
         "rgb": (4, 84, 84),
     }
-
-
-    # ------------------------------------------------------------------
-    # Notes
-    # ------------------------------------------------------------------
-    # Action format: [v, w]
-    # Differential wheel mapping handled in TekoEnv.
