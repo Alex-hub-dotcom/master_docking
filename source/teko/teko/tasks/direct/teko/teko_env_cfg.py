@@ -2,14 +2,12 @@
 """
 TEKO Environment Configuration (Torque-driven, Modular)
 -------------------------------------------------------
-Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
+Optimized for:
+- 84×84 grayscale observations (4-frame stack)
+- 60 parallel environments
+- New PPO + CNN 84px pipeline
 
-Provides configuration for:
-- Active torque-driven robot (spawn offset added to prevent floor clipping)
-- Static goal robot (with ArUco marker)
-- Camera setup
-- Arena limits
-- Rectangular body footprints for active & static robots
+Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
 """
 
 from __future__ import annotations
@@ -30,39 +28,28 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # General parameters
     # ------------------------------------------------------------------
     decimation = 2
-    episode_length_s = 15.0          # shorter episodes: 15 seconds
+    episode_length_s = 15.0
     enable_curriculum = False
 
-    # Visual debug helpers (used by TekoEnv)
-    # - red arena boundaries at |x| = arena_half_x, |y| = arena_half_y
-    # - green/red rectangular boxes attached to active & static robots
     debug_boundaries: bool = False
     debug_robot_boxes: bool = False
 
     # ------------------------------------------------------------------
-    # Arena limits (env-local coordinates, meters)
+    # Arena limits
     # ------------------------------------------------------------------
-    # These are used BOTH for:
-    #   - out-of-bounds check in TekoEnv._get_dones
-    #   - red debug boundary walls in TekoEnv._spawn_arena_boundaries
-    arena_half_x: float = 1.8   # short side (tuned to match wood)
-    arena_half_y: float = 2.4   # long side  (tuned to match wood)
+    arena_half_x: float = 1.8
+    arena_half_y: float = 2.4
 
     # ------------------------------------------------------------------
-    # Rectangular body footprints (meters)
+    # Body footprints
     # ------------------------------------------------------------------
-    # Used for:
-    #   - debug chassis boxes (green = active, red = static)
-    #   - static-box collision in TekoEnv._get_dones
-    #
-    # 35 cm x 20 cm as you measured.
     active_body_length: float = 0.35
     active_body_width: float = 0.20
     static_body_length: float = 0.35
     static_body_width: float = 0.20
 
     # ------------------------------------------------------------------
-    # Simulation setup
+    # Simulation
     # ------------------------------------------------------------------
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
@@ -72,18 +59,17 @@ class TekoEnvCfg(DirectRLEnvCfg):
     )
 
     # ------------------------------------------------------------------
-    # Scene configuration
+    # Scene (UPDATED: num_envs = 60)
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,
+        num_envs=60,
         env_spacing=6.0,
         replicate_physics=True,
     )
 
     # ------------------------------------------------------------------
-    # Spawn offset (active robot only)
+    # Spawn offset
     # ------------------------------------------------------------------
-    # Prevents the robot's wheels from spawning intersecting with the ground.
     robot_spawn_z_offset = 0.03
 
     # ------------------------------------------------------------------
@@ -93,7 +79,6 @@ class TekoEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot"
     )
 
-    # Wheel joints used for torque control
     dof_names = [
         "TEKO_Chassi_JointWheelFrontLeft",
         "TEKO_Chassi_JointWheelFrontRight",
@@ -102,24 +87,28 @@ class TekoEnvCfg(DirectRLEnvCfg):
     ]
 
     # ------------------------------------------------------------------
-    # Actuation parameters
+    # Actuation
     # ------------------------------------------------------------------
     action_scale = 1.0
     max_wheel_torque = 1.2
-    wheel_polarity = [1.0, -1.0, 1.0, -1.0]  # Left/Right differential polarity
+    wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
     # ------------------------------------------------------------------
-    # Camera configuration (rear RGB camera)
+    # Camera Configuration (UPDATED TO 84×84)
     # ------------------------------------------------------------------
     @configclass
     class CameraCfg:
-        """RGB camera mounted on the back wall of TEKO."""
+        """Rear grayscale camera for RL docking."""
+
         prim_path = (
             "/World/envs/env_.*/Robot/teko_urdf/TEKO_Body/"
             "TEKO_WallBack/TEKO_Camera/RearCamera"
         )
-        width = 128
-        height = 128
+
+        # RESOLUTION UPDATED: 84×84
+        width = 84
+        height = 84
+
         frequency_hz = 15
         focal_length = 3.6
         horiz_aperture = 4.8
@@ -127,40 +116,39 @@ class TekoEnvCfg(DirectRLEnvCfg):
         f_stop = 16.0
         focus_distance = 2.0
 
+        # IMPORTANT: tell wrapper to convert to grayscale
+        grayscale = True
+
     camera = CameraCfg()
 
     # ------------------------------------------------------------------
-    # Static goal robot configuration (with ArUco marker)
+    # Static goal robot
     # ------------------------------------------------------------------
     @configclass
     class GoalCfg:
-        """Static goal robot used as docking target."""
+        """Static robot used as docking target."""
         usd_path = "/workspace/teko/documents/CAD/USD/teko.usd"
         prim_path = "/World/envs/env_.*/RobotGoal"
         aruco_texture = "/workspace/teko/documents/Aruco/test_marker.png"
         position = (1.0, 0.0, 0.40)
         aruco_offset = (0.17, 0.0, -0.045)
-        aruco_size = 0.05  # meters
+        aruco_size = 0.05
 
     goal = GoalCfg()
 
     # ------------------------------------------------------------------
-    # Observation and action spaces
+    # Observation and Action Spaces (UPDATED)
     # ------------------------------------------------------------------
-    # Action space is 2D: [v, w] = [forward/back, turn], each in [-1, 1].
     action_space = (2,)
+
+    # OBSERVATION: 4 grayscale frames at 84×84
     observation_space = {
-    "rgb": (4, 128, 128),     # 4 grayscale frames (stack): [K=4, H=64, W=64]
+        "rgb": (4, 84, 84),
     }
+
 
     # ------------------------------------------------------------------
     # Notes
     # ------------------------------------------------------------------
-    # Actions in [-1, 1] are interpreted as:
-    #   v = actions[0] → forward/backward command
-    #   w = actions[1] → turning command
-    #
-    # Inside the environment, these are mapped to wheel torques with:
-    #   left  = v - k * w
-    #   right = v + k * w
-    # and then scaled by max_wheel_torque.
+    # Action format: [v, w]
+    # Differential wheel mapping handled in TekoEnv.
