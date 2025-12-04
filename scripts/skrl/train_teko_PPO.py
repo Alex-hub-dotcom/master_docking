@@ -39,22 +39,18 @@ from isaaclab.app import AppLauncher
 # =============================================================================
 
 HYPERPARAMS = {
-    # PPO core
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_ratio": 0.15,
     "value_clip": 0.2,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
-    
-    # Curriculum
     "min_stage_steps": 50_000,
 }
 
 MAX_STAGE_STEPS = 1_000_000
 CHECKPOINT_INTERVAL = 30_000
 
-# Rehearsal settings
 REHEARSAL_ENABLED = True
 REHEARSAL_MIN_STAGE = 2
 REHEARSAL_MAX_HISTORY = 3
@@ -70,7 +66,6 @@ args = None
 # =============================================================================
 
 def get_stage_threshold(level: int) -> float:
-    """Success rate threshold to advance from each stage."""
     if level <= 0:
         return 0.80
     elif level <= 4:
@@ -86,7 +81,6 @@ def get_stage_threshold(level: int) -> float:
 
 
 def get_entropy_coef(level: int) -> float:
-    """Entropy coefficient per curriculum stage."""
     if level <= 6:
         return 0.05
     elif level <= 12:
@@ -102,7 +96,6 @@ def get_entropy_coef(level: int) -> float:
 # =============================================================================
 
 def compute_gae(rewards, values, dones, gamma, lam):
-    """Compute Generalized Advantage Estimation."""
     T, N = rewards.shape
     advantages = torch.zeros_like(rewards)
     last_gae = 0.0
@@ -123,23 +116,19 @@ def ppo_update(policy, optimizer, obs, actions, logp_old,
                clip_ratio=0.15, value_clip=0.2,
                entropy_coef=0.05, value_coef=0.5,
                max_grad_norm=0.5):
-    """Perform PPO update on collected rollout data."""
-    
+
     device = next(policy.parameters()).device
     T, N, C, H, W = obs.shape
     total = T * N
 
-    # Flatten for minibatch sampling
     obs_flat = obs.view(total, C, H, W)
     actions_flat = actions.view(total, 2)
     logp_flat = logp_old.view(-1)
     adv_flat = advantages.view(-1)
     ret_flat = returns.view(-1)
 
-    # Normalize advantages
     adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
-    # Tracking
     p_losses, v_losses, entropies, grad_norms = [], [], [], []
 
     for _ in range(epochs):
@@ -153,35 +142,28 @@ def ppo_update(policy, optimizer, obs, actions, logp_old,
             mb_adv = adv_flat[mb].to(device)
             mb_ret = ret_flat[mb].to(device)
 
-            # Forward pass
             logp, value, entropy = policy.evaluate(mb_obs, mb_act)
             ratio = (logp - mb_logp).exp()
 
-            # Policy loss (clipped)
             p_loss = -torch.min(
                 ratio * mb_adv,
                 torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * mb_adv
             ).mean()
 
-            # Value loss (clipped)
             if value_clip:
                 value = torch.clamp(value, mb_ret - value_clip, mb_ret + value_clip)
             v_loss = F.mse_loss(value, mb_ret)
 
-            # Total loss
             loss = p_loss + value_coef * v_loss - entropy_coef * entropy.mean()
 
-            # Backward pass
             optimizer.zero_grad()
             loss.backward()
 
-            # Clip gradients and get pre-clip norm
             grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm).item()
             grad_norms.append(grad_norm)
 
             optimizer.step()
 
-            # Track losses
             p_losses.append(p_loss.item())
             v_losses.append(v_loss.item())
             entropies.append(entropy.mean().item())
@@ -190,7 +172,6 @@ def ppo_update(policy, optimizer, obs, actions, logp_old,
 
 
 def collect_rollout(env, policy, device, rollout_len):
-    """Collect rollout data for training."""
     obs_buf, act_buf, rew_buf, val_buf, logp_buf, done_buf = [], [], [], [], [], []
 
     obs_dict, _ = env.reset()
@@ -228,15 +209,12 @@ def collect_rollout(env, policy, device, rollout_len):
 # =============================================================================
 
 class Policy(nn.Module):
-    """Actor-Critic policy with CNN encoder for 84×84 grayscale input."""
-    
     LOG_STD_V_MIN, LOG_STD_V_MAX = -1.5, 0.2
     LOG_STD_W_MIN, LOG_STD_W_MAX = -1.0, 0.6
 
     def __init__(self, create_visual_encoder):
         super().__init__()
 
-        # CNN encoder - explicitly 84×84
         self.encoder = create_visual_encoder(
             architecture="simple",
             feature_dim=256,
@@ -246,7 +224,6 @@ class Policy(nn.Module):
             input_w=84,
         )
 
-        # Actor head
         self.actor = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
@@ -256,7 +233,6 @@ class Policy(nn.Module):
             nn.Tanh(),
         )
 
-        # Critic head
         self.critic = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
@@ -265,15 +241,12 @@ class Policy(nn.Module):
             nn.Linear(64, 1),
         )
 
-        # Learnable log_std
         self.log_std_v = nn.Parameter(torch.tensor(0.0))
         self.log_std_w = nn.Parameter(torch.tensor(0.0))
 
-        # Initialize heads
         self._init_heads()
 
     def _init_heads(self):
-        """Orthogonal initialization for actor/critic heads."""
         for module in [self.actor, self.critic]:
             for m in module.modules():
                 if isinstance(m, nn.Linear):
@@ -281,7 +254,6 @@ class Policy(nn.Module):
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
 
-        # Small init for actor output layer (stable starting policy)
         nn.init.orthogonal_(self.actor[-2].weight, gain=0.01)
 
     def forward(self, obs):
@@ -314,9 +286,8 @@ class Policy(nn.Module):
 # TRAINING UTILITIES
 # =============================================================================
 
-def save_checkpoint(path, policy, optimizer, step, curriculum_level, 
+def save_checkpoint(path, policy, optimizer, step, curriculum_level,
                     steps_in_stage, mastered_stages):
-    """Save training checkpoint."""
     torch.save({
         "policy": policy.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -328,7 +299,6 @@ def save_checkpoint(path, policy, optimizer, step, curriculum_level,
 
 
 def load_checkpoint(path, policy, optimizer, device):
-    """Load training checkpoint."""
     ckpt = torch.load(path, map_location=device)
     policy.load_state_dict(ckpt["policy"])
     optimizer.load_state_dict(ckpt["optimizer"])
@@ -341,7 +311,6 @@ def load_checkpoint(path, policy, optimizer, device):
 
 
 def log_metrics(writer, step, metrics):
-    """Log metrics to TensorBoard."""
     for key, value in metrics.items():
         writer.add_scalar(key, value, step)
 
@@ -350,22 +319,21 @@ def log_metrics(writer, step, metrics):
 # CURRICULUM MANAGEMENT
 # =============================================================================
 
-def do_stage_mixing(env, policy, optimizer, device, current_stage, 
+def do_stage_mixing(env, policy, optimizer, device, current_stage,
                     num_iterations=40, rollout_len=16, epochs=3, batch_size=2048):
-    """Mix training between current and next stage for smooth transition."""
     print(f"🔄 Mixing S{current_stage} ↔ S{current_stage + 1}...")
-    
+
     for i in range(num_iterations):
         stage = current_stage if i % 2 == 0 else current_stage + 1
         env.set_curriculum_level(stage)
-        
+
         data = collect_rollout(env, policy, device, rollout_len)
         with torch.no_grad():
             adv, ret = compute_gae(
                 data[2], data[3], data[5],
                 HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
             )
-        
+
         ppo_update(
             policy, optimizer,
             data[0], data[1], data[4], adv, ret,
@@ -377,7 +345,6 @@ def do_stage_mixing(env, policy, optimizer, device, current_stage,
 
 def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
                  num_updates=4, rollout_len=32, epochs=3, batch_size=2048):
-    """Rehearse on previously mastered stages to prevent forgetting."""
     candidates = [
         s for s in mastered_stages
         if max(0, current_stage - REHEARSAL_MAX_HISTORY) <= s < current_stage
@@ -397,7 +364,7 @@ def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
                 data[2], data[3], data[5],
                 HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
             )
-        
+
         ppo_update(
             policy, optimizer,
             data[0], data[1], data[4], adv, ret,
@@ -415,23 +382,20 @@ def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
 
 def parse_args():
     parser = argparse.ArgumentParser(description="TEKO PPO Training")
-    
-    # Training params
+
     parser.add_argument("--num_envs", type=int, default=60)
     parser.add_argument("--steps", type=int, default=120_000_000)
     parser.add_argument("--seed", type=int, default=42)
-    
-    # Optimization params
+
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_min", type=float, default=1e-5)
     parser.add_argument("--rollout_len", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=2048)
-    
-    # Options
+
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--no_lr_decay", action="store_true", help="Disable LR scheduler")
-    
+
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
 
@@ -445,9 +409,6 @@ def main():
     args = parse_args()
     args.enable_cameras = True
 
-    # =========================================================================
-    # SETUP
-    # =========================================================================
     print("\n" + "=" * 75)
     print("🎓 TEKO - 28-STAGE CURRICULUM (84×84 GRAYSCALE, PPO v10.1 FINAL)")
     print("=" * 75)
@@ -461,15 +422,12 @@ def main():
 
     app = AppLauncher(args)
     sim = app.app
+    
 
-    # Import after AppLauncher
     from teko.tasks.direct.teko.teko_env import TekoEnv, TekoEnvCfg
     from teko.tasks.direct.teko.teko_brain.cnn_model import create_visual_encoder
     from teko.tasks.direct.teko.curriculum.curriculum_manager import STAGE_NAMES
 
-    # =========================================================================
-    # INITIALIZE
-    # =========================================================================
     cfg = TekoEnvCfg()
     cfg.scene.num_envs = args.num_envs
     cfg.enable_curriculum = True
@@ -482,7 +440,6 @@ def main():
         policy = Policy(create_visual_encoder).to(device)
         optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
 
-        # LR scheduler
         total_updates = args.steps // (args.num_envs * args.rollout_len)
         if not args.no_lr_decay:
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -491,16 +448,12 @@ def main():
         else:
             scheduler = None
 
-        # State variables
         start_step = 0
         steps_in_stage = 0
         last_ckpt = 0
         last_rehearsal = 0
         mastered = []
 
-        # =====================================================================
-        # LOAD CHECKPOINT
-        # =====================================================================
         if args.checkpoint:
             print(f"🔁 Loading checkpoint: {args.checkpoint}")
             start_step, curr_level, steps_in_stage, mastered = load_checkpoint(
@@ -510,7 +463,6 @@ def main():
             last_ckpt = start_step
             last_rehearsal = start_step
 
-            # Advance scheduler
             if scheduler:
                 completed_updates = start_step // (args.num_envs * args.rollout_len)
                 for _ in range(completed_updates):
@@ -518,22 +470,15 @@ def main():
 
             print(f"Resumed from step {start_step}, stage S{curr_level}")
 
-        # =====================================================================
-        # LOGGING SETUP
-        # =====================================================================
         log_dir = f"teko_curriculum/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         os.makedirs(log_dir, exist_ok=True)
         writer = SummaryWriter(log_dir)
         print(f"📊 Logs: {log_dir}\n")
 
-        # Model summary
         total_params = sum(p.numel() for p in policy.parameters())
         trainable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         print(f"🧠 Model: {total_params:,} params ({trainable_params:,} trainable)\n")
 
-        # =====================================================================
-        # EPISODE TRACKING
-        # =====================================================================
         obs_dict, _ = env.reset()
         obs = obs_dict["rgb"].to(device)
 
@@ -547,213 +492,177 @@ def main():
 
         step = start_step
 
-        # =====================================================================
-        # TRAINING LOOP
-        # =====================================================================
-        try:
-            while step < args.steps:
-                # -------------------------------------------------------------
-                # COLLECT ROLLOUT
-                # -------------------------------------------------------------
-                obs_buf, act_buf, rew_buf, val_buf, logp_buf, done_buf = [], [], [], [], [], []
+        print("🚀 Starting training loop...\n")
 
-                for _ in range(args.rollout_len):
-                    with torch.no_grad():
-                        action, logp, value = policy.act(obs)
+        while step < args.steps:
+            obs_buf, act_buf, rew_buf, val_buf, logp_buf, done_buf = [], [], [], [], [], []
 
-                    obs_dict, reward, term, trunc, _ = env.step(action)
-                    next_obs = obs_dict["rgb"].to(device)
-                    done = term | trunc
+            for _ in range(args.rollout_len):
+                with torch.no_grad():
+                    action, logp, value = policy.act(obs)
 
-                    cur_reward += reward
-                    cur_length += 1
+                obs_dict, reward, term, trunc, _ = env.step(action)
+                next_obs = obs_dict["rgb"].to(device)
+                done = term | trunc
 
-                    # Track episode stats
-                    for i in range(args.num_envs):
-                        if done[i]:
-                            ep_rewards.append(cur_reward[i].item())
-                            ep_lengths.append(cur_length[i].item())
-                            success = reward[i] > 50.0
-                            ep_successes.append(1.0 if success else 0.0)
-                            stage_successes.append(1.0 if success else 0.0)
-                            cur_reward[i] = 0.0
-                            cur_length[i] = 0
+                cur_reward += reward
+                cur_length += 1
 
-                    obs_buf.append(obs.cpu())
-                    act_buf.append(action.cpu())
-                    rew_buf.append(reward.cpu())
-                    val_buf.append(value.cpu())
-                    logp_buf.append(logp.cpu())
-                    done_buf.append(done.float().cpu())
+                for i in range(args.num_envs):
+                    if done[i]:
+                        ep_rewards.append(cur_reward[i].item())
+                        ep_lengths.append(cur_length[i].item())
+                        success = reward[i] > 50.0
+                        ep_successes.append(1.0 if success else 0.0)
+                        stage_successes.append(1.0 if success else 0.0)
+                        cur_reward[i] = 0.0
+                        cur_length[i] = 0
 
-                    obs = next_obs
-                    step += args.num_envs
-                    steps_in_stage += args.num_envs
+                obs_buf.append(obs.cpu())
+                act_buf.append(action.cpu())
+                rew_buf.append(reward.cpu())
+                val_buf.append(value.cpu())
+                logp_buf.append(logp.cpu())
+                done_buf.append(done.float().cpu())
 
-                # -------------------------------------------------------------
-                # PREPARE DATA
-                # -------------------------------------------------------------
-                obs_t = torch.stack(obs_buf)
-                act_t = torch.stack(act_buf)
-                rew_t = torch.stack(rew_buf)
-                val_t = torch.stack(val_buf)
-                logp_t = torch.stack(logp_buf)
-                done_t = torch.stack(done_buf)
+                obs = next_obs
+                step += args.num_envs
+                steps_in_stage += args.num_envs
 
-                # -------------------------------------------------------------
-                # COMPUTE STATS
-                # -------------------------------------------------------------
-                mean_r = np.mean(ep_rewards) if ep_rewards else 0.0
-                mean_len = np.mean(ep_lengths) if ep_lengths else 0.0
-                ssr = np.mean(stage_successes) if stage_successes else 0.0
+            obs_t = torch.stack(obs_buf)
+            act_t = torch.stack(act_buf)
+            rew_t = torch.stack(rew_buf)
+            val_t = torch.stack(val_buf)
+            logp_t = torch.stack(logp_buf)
+            done_t = torch.stack(done_buf)
+
+            mean_r = np.mean(ep_rewards) if ep_rewards else 0.0
+            mean_len = np.mean(ep_lengths) if ep_lengths else 0.0
+            ssr = np.mean(stage_successes) if stage_successes else 0.0
+
+            stage = env.curriculum_level
+            threshold = get_stage_threshold(stage)
+            ent_coef = get_entropy_coef(stage)
+            current_lr = optimizer.param_groups[0]['lr']
+
+            with torch.no_grad():
+                adv, ret = compute_gae(
+                    rew_t, val_t, done_t,
+                    HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
+                )
+
+            p_loss, v_loss, entropy, grad_norm = ppo_update(
+                policy, optimizer,
+                obs_t, act_t, logp_t, adv, ret,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                clip_ratio=HYPERPARAMS["clip_ratio"],
+                value_clip=HYPERPARAMS["value_clip"],
+                entropy_coef=ent_coef,
+                value_coef=HYPERPARAMS["value_coef"],
+                max_grad_norm=HYPERPARAMS["max_grad_norm"],
+            )
+
+            if scheduler:
+                scheduler.step()
+
+            log_metrics(writer, step, {
+                "train/reward": mean_r,
+                "train/episode_length": mean_len,
+                "train/stage_success": ssr,
+                "train/stage": stage,
+                "train/entropy_coef": ent_coef,
+                "train/learning_rate": current_lr,
+                "train/grad_norm": grad_norm,
+                "loss/policy": p_loss,
+                "loss/value": v_loss,
+                "loss/entropy": entropy,
+                "policy/log_std_v": policy.log_std_v.item(),
+                "policy/log_std_w": policy.log_std_w.item(),
+            })
+
+            if hasattr(env, "reward_components"):
+                for k, v in env.reward_components.items():
+                    if v:
+                        writer.add_scalar(f"rewards/{k}", np.mean(v), step)
+                    env.reward_components[k].clear()
+
+            print(
+                f"[{step:9d}] S{stage:02d} | R={mean_r:6.1f} | "
+                f"SSR={ssr*100:4.1f}% | Thr={threshold*100:.0f}% | "
+                f"LR={current_lr:.1e} | Ent={entropy:.3f}"
+            )
+
+            if steps_in_stage >= HYPERPARAMS["min_stage_steps"]:
+                advance = False
+                mastered_now = False
+
+                if len(stage_successes) >= 50 and ssr >= threshold:
+                    advance = True
+                    mastered_now = True
+                    print(f"✓ S{stage} mastered! (SSR={ssr:.1%})")
+
+                elif steps_in_stage >= MAX_STAGE_STEPS:
+                    advance = True
+                    print(f"⚠ Safety valve triggered at S{stage}")
+
+                if advance and stage < len(STAGE_NAMES) - 1:
+                    if mastered_now and stage not in mastered:
+                        mastered.append(stage)
+                        mastered = sorted(set(mastered))
+                        print(f"🧠 Mastered stages: {mastered}")
+
+                    do_stage_mixing(
+                        env, policy, optimizer, device, stage,
+                        num_iterations=40, rollout_len=16,
+                        epochs=args.epochs, batch_size=args.batch_size
+                    )
+
+                    env.set_curriculum_level(stage + 1)
+                    obs_dict, _ = env.reset()
+                    obs = obs_dict["rgb"].to(device)
+                    cur_reward.zero_()
+                    cur_length.zero_()
+                    stage_successes.clear()
+                    steps_in_stage = 0
+                    print(f"➡️ Advanced to S{stage + 1}")
+
+            if (REHEARSAL_ENABLED and mastered and
+                env.curriculum_level >= REHEARSAL_MIN_STAGE and
+                step - last_rehearsal >= REHEARSAL_INTERVAL_STEPS):
 
                 stage = env.curriculum_level
-                threshold = get_stage_threshold(stage)
-                ent_coef = get_entropy_coef(stage)
-                current_lr = optimizer.param_groups[0]['lr']
 
-                # -------------------------------------------------------------
-                # GAE + PPO UPDATE
-                # -------------------------------------------------------------
-                with torch.no_grad():
-                    adv, ret = compute_gae(
-                        rew_t, val_t, done_t,
-                        HYPERPARAMS["gamma"], HYPERPARAMS["gae_lambda"]
-                    )
+                if do_rehearsal(
+                    env, policy, optimizer, device, stage, mastered,
+                    num_updates=REHEARSAL_UPDATES,
+                    rollout_len=REHEARSAL_ROLLOUT_LEN,
+                    epochs=args.epochs, batch_size=args.batch_size
+                ):
+                    env.set_curriculum_level(stage)
+                    obs_dict, _ = env.reset()
+                    obs = obs_dict["rgb"].to(device)
+                    cur_reward.zero_()
+                    cur_length.zero_()
+                    last_rehearsal = step
+                    print(f"✅ Back to S{stage}")
 
-                p_loss, v_loss, entropy, grad_norm = ppo_update(
-                    policy, optimizer,
-                    obs_t, act_t, logp_t, adv, ret,
-                    epochs=args.epochs,
-                    batch_size=args.batch_size,
-                    clip_ratio=HYPERPARAMS["clip_ratio"],
-                    value_clip=HYPERPARAMS["value_clip"],
-                    entropy_coef=ent_coef,
-                    value_coef=HYPERPARAMS["value_coef"],
-                    max_grad_norm=HYPERPARAMS["max_grad_norm"],
+            if step - last_ckpt >= CHECKPOINT_INTERVAL:
+                path = f"{log_dir}/ckpt_{step}.pt"
+                save_checkpoint(
+                    path, policy, optimizer, step,
+                    env.curriculum_level, steps_in_stage, mastered
                 )
+                last_ckpt = step
+                print(f"💾 Saved: {path}")
 
-                # LR scheduler step
-                if scheduler:
-                    scheduler.step()
-
-                # -------------------------------------------------------------
-                # LOGGING
-                # -------------------------------------------------------------
-                log_metrics(writer, step, {
-                    "train/reward": mean_r,
-                    "train/episode_length": mean_len,
-                    "train/stage_success": ssr,
-                    "train/stage": stage,
-                    "train/entropy_coef": ent_coef,
-                    "train/learning_rate": current_lr,
-                    "train/grad_norm": grad_norm,
-                    "loss/policy": p_loss,
-                    "loss/value": v_loss,
-                    "loss/entropy": entropy,
-                    "policy/log_std_v": policy.log_std_v.item(),
-                    "policy/log_std_w": policy.log_std_w.item(),
-                })
-
-                # Reward components
-                if hasattr(env, "reward_components"):
-                    for k, v in env.reward_components.items():
-                        if v:
-                            writer.add_scalar(f"rewards/{k}", np.mean(v), step)
-                        env.reward_components[k].clear()
-
-                # Console output
-                print(
-                    f"[{step:9d}] S{stage:02d} | R={mean_r:6.1f} | "
-                    f"SSR={ssr*100:4.1f}% | Thr={threshold*100:.0f}% | "
-                    f"LR={current_lr:.1e} | Ent={entropy:.3f}"
-                )
-
-                # -------------------------------------------------------------
-                # CURRICULUM ADVANCEMENT
-                # -------------------------------------------------------------
-                if steps_in_stage >= HYPERPARAMS["min_stage_steps"]:
-                    advance = False
-                    mastered_now = False
-
-                    # Check mastery
-                    if len(stage_successes) >= 50 and ssr >= threshold:
-                        advance = True
-                        mastered_now = True
-                        print(f"✓ S{stage} mastered! (SSR={ssr:.1%})")
-
-                    # Safety valve
-                    elif steps_in_stage >= MAX_STAGE_STEPS:
-                        advance = True
-                        print(f"⚠ Safety valve triggered at S{stage}")
-
-                    # Advance to next stage
-                    if advance and stage < len(STAGE_NAMES) - 1:
-                        if mastered_now and stage not in mastered:
-                            mastered.append(stage)
-                            mastered = sorted(set(mastered))
-                            print(f"🧠 Mastered stages: {mastered}")
-
-                        # Stage mixing
-                        do_stage_mixing(
-                            env, policy, optimizer, device, stage,
-                            num_iterations=40, rollout_len=16,
-                            epochs=args.epochs, batch_size=args.batch_size
-                        )
-
-                        # Advance
-                        env.set_curriculum_level(stage + 1)
-                        obs_dict, _ = env.reset()
-                        obs = obs_dict["rgb"].to(device)
-                        cur_reward.zero_()
-                        cur_length.zero_()
-                        stage_successes.clear()
-                        steps_in_stage = 0
-                        print(f"➡️ Advanced to S{stage + 1}")
-
-                # -------------------------------------------------------------
-                # REHEARSAL
-                # -------------------------------------------------------------
-                if (REHEARSAL_ENABLED and mastered and
-                    env.curriculum_level >= REHEARSAL_MIN_STAGE and
-                    step - last_rehearsal >= REHEARSAL_INTERVAL_STEPS):
-
-                    stage = env.curriculum_level
-                    
-                    if do_rehearsal(
-                        env, policy, optimizer, device, stage, mastered,
-                        num_updates=REHEARSAL_UPDATES,
-                        rollout_len=REHEARSAL_ROLLOUT_LEN,
-                        epochs=args.epochs, batch_size=args.batch_size
-                    ):
-                        # Reset after rehearsal
-                        env.set_curriculum_level(stage)
-                        obs_dict, _ = env.reset()
-                        obs = obs_dict["rgb"].to(device)
-                        cur_reward.zero_()
-                        cur_length.zero_()
-                        last_rehearsal = step
-                        print(f"✅ Back to S{stage}")
-
-                # -------------------------------------------------------------
-                # CHECKPOINT
-                # -------------------------------------------------------------
-                if step - last_ckpt >= CHECKPOINT_INTERVAL:
-                    path = f"{log_dir}/ckpt_{step}.pt"
-                    save_checkpoint(
-                        path, policy, optimizer, step,
-                        env.curriculum_level, steps_in_stage, mastered
-                    )
-                    last_ckpt = step
-                    print(f"💾 Saved: {path}")
-
-        except KeyboardInterrupt:
-            path = f"{log_dir}/interrupt_{step}.pt"
-            save_checkpoint(
-                path, policy, optimizer, step,
-                env.curriculum_level, steps_in_stage, mastered
-            )
-            print(f"\n💾 Interrupted: saved to {path}")
+    except KeyboardInterrupt:
+        path = f"{log_dir}/interrupt_{step}.pt"
+        save_checkpoint(
+            path, policy, optimizer, step,
+            env.curriculum_level, steps_in_stage, mastered
+        )
+        print(f"\n💾 Interrupted: saved to {path}")
 
     finally:
         if writer:

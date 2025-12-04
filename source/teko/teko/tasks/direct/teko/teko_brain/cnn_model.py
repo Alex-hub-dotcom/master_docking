@@ -31,7 +31,7 @@ class SimpleCNN(nn.Module):
         # Conv1: 84 -> 27, Conv2: 27 -> 13, Conv3: 13 -> 6
         self.ln1 = nn.LayerNorm([32, 27, 27])
         self.ln2 = nn.LayerNorm([64, 13, 13])
-        self.ln3 = nn.LayerNorm([128, 6, 6])
+        self.ln3 = nn.LayerNorm([128, 7, 7])
 
         # Dynamic flatten size (safety check)
         with torch.no_grad():
