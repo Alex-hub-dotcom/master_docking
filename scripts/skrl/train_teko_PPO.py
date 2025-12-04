@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-TEKO PPO TRAINING (84×84 GRAYSCALE, v10.1 - FINAL)
-==================================================
+TEKO PPO TRAINING (v10.2 - 35-STAGE BLIND SEARCH EDITION)
+=========================================================
 
 Optimized for:
 - 84×84 grayscale input with SimpleCNN v9.6
-- 60 parallel environments on RTX 3090
-- 28-stage curriculum with anti-forgetting
+- 35-stage curriculum with micro-steps to 180°
+- Stage-aware thresholds, entropy, and step limits
 
-Features:
-- Explicit 84×84 CNN initialization
-- Cosine LR scheduler for late-stage stability
-- Orthogonal init on actor/critic heads
-- Batch size 2048
-- Comprehensive logging (grad norm, LR, log_std)
-- Clean modular structure for future GA optimization
+Key changes from v10.1:
+- Extended MAX_STAGE_STEPS for blind stages (S26+)
+- Lower SSR thresholds for blind stages
+- Higher entropy for exploration in blind stages
+- Separate rehearsal settings for blind stages
+- Better logging with angle info
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -48,13 +47,18 @@ HYPERPARAMS = {
     "min_stage_steps": 50_000,
 }
 
-MAX_STAGE_STEPS = 1_000_000
+# Stage-specific max steps (safety valve)
+MAX_STAGE_STEPS_DEFAULT = 1_000_000
+MAX_STAGE_STEPS_TURN = 1_500_000       # S23-S25 (goal visible)
+MAX_STAGE_STEPS_BLIND = 2_500_000      # S26+ (blind search needs more time)
+
 CHECKPOINT_INTERVAL = 30_000
 
+# Rehearsal settings
 REHEARSAL_ENABLED = True
 REHEARSAL_MIN_STAGE = 2
-REHEARSAL_MAX_HISTORY = 3
-REHEARSAL_INTERVAL_STEPS = 40_000
+REHEARSAL_MAX_HISTORY = 4              # Look back further for blind stages
+REHEARSAL_INTERVAL_STEPS = 100_000     # Less frequent to allow learning
 REHEARSAL_ROLLOUT_LEN = 32
 REHEARSAL_UPDATES = 4
 
@@ -62,10 +66,14 @@ args = None
 
 
 # =============================================================================
-# CURRICULUM FUNCTIONS
+# CURRICULUM FUNCTIONS (STAGE-AWARE)
 # =============================================================================
 
-def get_stage_threshold(level: int) -> float:
+def get_stage_threshold(level: int, is_blind: bool = False) -> float:
+    """
+    Success rate threshold to advance.
+    Lower for blind stages since they're qualitatively harder.
+    """
     if level <= 0:
         return 0.80
     elif level <= 4:
@@ -76,19 +84,37 @@ def get_stage_threshold(level: int) -> float:
         return 0.60
     elif level <= 22:
         return 0.58
-    else:
+    elif level <= 25:  # Turn stages (goal visible)
         return 0.55
+    else:  # Blind stages S26+
+        return 0.45  # Lower threshold - blind search is hard
 
 
-def get_entropy_coef(level: int) -> float:
+def get_max_stage_steps(level: int, is_blind: bool = False) -> int:
+    """Get max steps allowed per stage before safety valve."""
+    if is_blind or level >= 26:
+        return MAX_STAGE_STEPS_BLIND
+    elif level >= 23:
+        return MAX_STAGE_STEPS_TURN
+    else:
+        return MAX_STAGE_STEPS_DEFAULT
+
+
+def get_entropy_coef(level: int, is_blind: bool = False) -> float:
+    """
+    Entropy coefficient per curriculum stage.
+    Higher for blind stages to encourage exploration.
+    """
     if level <= 6:
         return 0.05
     elif level <= 12:
         return 0.06
     elif level <= 22:
         return 0.05
-    else:
-        return 0.05
+    elif level <= 25:  # Turn stages (goal visible)
+        return 0.06
+    else:  # Blind stages S26+
+        return 0.08  # Higher entropy for exploration
 
 
 # =============================================================================
@@ -339,7 +365,7 @@ def do_stage_mixing(env, policy, optimizer, device, current_stage,
             data[0], data[1], data[4], adv, ret,
             epochs=epochs,
             batch_size=batch_size,
-            entropy_coef=get_entropy_coef(stage),
+            entropy_coef=get_entropy_coef(stage, stage >= 26),
         )
 
 
@@ -370,7 +396,7 @@ def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
             data[0], data[1], data[4], adv, ret,
             epochs=epochs,
             batch_size=batch_size,
-            entropy_coef=get_entropy_coef(r_stage),
+            entropy_coef=get_entropy_coef(r_stage, r_stage >= 26),  # Fixed
         )
 
     return True
@@ -381,10 +407,10 @@ def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
 # =============================================================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="TEKO PPO Training")
+    parser = argparse.ArgumentParser(description="TEKO PPO Training (35-Stage)")
 
     parser.add_argument("--num_envs", type=int, default=60)
-    parser.add_argument("--steps", type=int, default=120_000_000)
+    parser.add_argument("--steps", type=int, default=150_000_000)  # More steps for 35 stages
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -410,7 +436,7 @@ def main():
     args.enable_cameras = True
 
     print("\n" + "=" * 75)
-    print("🎓 TEKO - 28-STAGE CURRICULUM (84×84 GRAYSCALE, PPO v10.1 FINAL)")
+    print("🎓 TEKO - 35-STAGE CURRICULUM (84×84 GRAYSCALE, PPO v10.2)")
     print("=" * 75)
     print(f"Envs: {args.num_envs} | Steps: {args.steps:,}")
     print(f"LR: {args.lr} → {args.lr_min} | Batch: {args.batch_size} | Rollout: {args.rollout_len}")
@@ -422,11 +448,12 @@ def main():
 
     app = AppLauncher(args)
     sim = app.app
-    
 
     from teko.tasks.direct.teko.teko_env import TekoEnv, TekoEnvCfg
     from teko.tasks.direct.teko.teko_brain.cnn_model import create_visual_encoder
-    from teko.tasks.direct.teko.curriculum.curriculum_manager import STAGE_NAMES
+    from teko.tasks.direct.teko.curriculum.curriculum_manager import (
+        NUM_STAGES, STAGE_NAMES, is_turn_stage, is_blind_stage, get_stage_angle
+    )
 
     cfg = TekoEnvCfg()
     cfg.scene.num_envs = args.num_envs
@@ -486,6 +513,10 @@ def main():
         ep_lengths = deque(maxlen=100)
         ep_successes = deque(maxlen=100)
         stage_successes = deque(maxlen=200)
+        
+        # Track successes and timeouts separately
+        recent_successes = deque(maxlen=50)
+        recent_timeouts = deque(maxlen=50)
 
         cur_reward = torch.zeros(args.num_envs, device=device)
         cur_length = torch.zeros(args.num_envs, dtype=torch.int32, device=device)
@@ -513,8 +544,13 @@ def main():
                         ep_rewards.append(cur_reward[i].item())
                         ep_lengths.append(cur_length[i].item())
                         success = reward[i] > 50.0
+                        timeout = trunc[i].item() and not term[i].item()
+                        
                         ep_successes.append(1.0 if success else 0.0)
                         stage_successes.append(1.0 if success else 0.0)
+                        recent_successes.append(1.0 if success else 0.0)
+                        recent_timeouts.append(1.0 if timeout else 0.0)
+                        
                         cur_reward[i] = 0.0
                         cur_length[i] = 0
 
@@ -539,10 +575,18 @@ def main():
             mean_r = np.mean(ep_rewards) if ep_rewards else 0.0
             mean_len = np.mean(ep_lengths) if ep_lengths else 0.0
             ssr = np.mean(stage_successes) if stage_successes else 0.0
+            
+            success_count = sum(recent_successes) if recent_successes else 0
+            timeout_count = sum(recent_timeouts) if recent_timeouts else 0
 
             stage = env.curriculum_level
-            threshold = get_stage_threshold(stage)
-            ent_coef = get_entropy_coef(stage)
+            is_blind = is_blind_stage(stage)
+            is_turn = is_turn_stage(stage)
+            angle = get_stage_angle(stage)
+            
+            threshold = get_stage_threshold(stage, is_blind)
+            ent_coef = get_entropy_coef(stage, is_blind)
+            max_steps = get_max_stage_steps(stage, is_blind)
             current_lr = optimizer.param_groups[0]['lr']
 
             with torch.no_grad():
@@ -566,14 +610,21 @@ def main():
             if scheduler:
                 scheduler.step()
 
+            # Log metrics
             log_metrics(writer, step, {
                 "train/reward": mean_r,
                 "train/episode_length": mean_len,
                 "train/stage_success": ssr,
                 "train/stage": stage,
+                "train/stage_angle": angle,
+                "train/is_blind_stage": float(is_blind),
                 "train/entropy_coef": ent_coef,
                 "train/learning_rate": current_lr,
                 "train/grad_norm": grad_norm,
+                "train/steps_in_stage": steps_in_stage,
+                "train/max_stage_steps": max_steps,
+                "train/success_count_50ep": success_count,
+                "train/timeout_count_50ep": timeout_count,
                 "loss/policy": p_loss,
                 "loss/value": v_loss,
                 "loss/entropy": entropy,
@@ -581,18 +632,23 @@ def main():
                 "policy/log_std_w": policy.log_std_w.item(),
             })
 
+            # Log reward components
             if hasattr(env, "reward_components"):
                 for k, v in env.reward_components.items():
                     if v:
                         writer.add_scalar(f"rewards/{k}", np.mean(v), step)
                     env.reward_components[k].clear()
 
+            # Console output with stage info
+            stage_marker = "🔍" if is_blind else ("🔄" if is_turn else "  ")
             print(
-                f"[{step:9d}] S{stage:02d} | R={mean_r:6.1f} | "
-                f"SSR={ssr*100:4.1f}% | Thr={threshold*100:.0f}% | "
-                f"LR={current_lr:.1e} | Ent={entropy:.3f}"
+                f"[{step:9d}] S{stage:02d} ({angle:3.0f}°) {stage_marker} | "
+                f"R={mean_r:6.1f} | Succ={success_count:2.0f}/50 T/O={timeout_count:2.0f} | "
+                f"SSR={ssr*100:4.1f}% >{threshold*100:.0f}% | "
+                f"Steps={steps_in_stage/1e6:.2f}M/{max_steps/1e6:.1f}M"
             )
 
+            # Check for stage advancement
             if steps_in_stage >= HYPERPARAMS["min_stage_steps"]:
                 advance = False
                 mastered_now = False
@@ -600,13 +656,13 @@ def main():
                 if len(stage_successes) >= 50 and ssr >= threshold:
                     advance = True
                     mastered_now = True
-                    print(f"✓ S{stage} mastered! (SSR={ssr:.1%})")
+                    print(f"✓ S{stage} ({angle}°) mastered! (SSR={ssr:.1%})")
 
-                elif steps_in_stage >= MAX_STAGE_STEPS:
+                elif steps_in_stage >= max_steps:
                     advance = True
-                    print(f"⚠ Safety valve triggered at S{stage}")
+                    print(f"⚠ Safety valve at S{stage} ({angle}°) after {steps_in_stage/1e6:.1f}M steps")
 
-                if advance and stage < len(STAGE_NAMES) - 1:
+                if advance and stage < NUM_STAGES - 1:
                     if mastered_now and stage not in mastered:
                         mastered.append(stage)
                         mastered = sorted(set(mastered))
@@ -624,9 +680,14 @@ def main():
                     cur_reward.zero_()
                     cur_length.zero_()
                     stage_successes.clear()
+                    recent_successes.clear()
+                    recent_timeouts.clear()
                     steps_in_stage = 0
-                    print(f"➡️ Advanced to S{stage + 1}")
+                    
+                    next_angle = get_stage_angle(stage + 1)
+                    print(f"➡️ Advanced to S{stage + 1} ({next_angle}°)")
 
+            # Rehearsal
             if (REHEARSAL_ENABLED and mastered and
                 env.curriculum_level >= REHEARSAL_MIN_STAGE and
                 step - last_rehearsal >= REHEARSAL_INTERVAL_STEPS):
@@ -647,6 +708,7 @@ def main():
                     last_rehearsal = step
                     print(f"✅ Back to S{stage}")
 
+            # Checkpointing
             if step - last_ckpt >= CHECKPOINT_INTERVAL:
                 path = f"{log_dir}/ckpt_{step}.pt"
                 save_checkpoint(

@@ -186,7 +186,6 @@ def _compute_turning_bonus(yaw_error: torch.Tensor, yaw_error_abs: torch.Tensor,
         torch.zeros_like(surface_xy),
     )
 
-
 def _compute_collision_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
     """Terminal penalty for collisions."""
     cfg = REWARD_CONFIG

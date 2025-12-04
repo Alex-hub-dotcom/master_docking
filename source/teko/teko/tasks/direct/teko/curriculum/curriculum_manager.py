@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-28-STAGE CURRICULUM FOR TEKO (v9.1 – 84px FINAL)
-================================================
+35-STAGE CURRICULUM FOR TEKO (v10.0 – 180° MICRO-STEPS)
+=======================================================
 
-Optimized for 84×84 grayscale vision-based docking.
+Optimized for 84×84 grayscale vision-based docking with
+smooth progression into blind search regime.
 
-Key design principles:
+Key changes from v9.1:
+- Added micro-steps from 90° to 180° (+10° per stage)
+- All turn stages use ±5cm lateral (proof-of-concept)
+- Separate replay probs for "visible" vs "blind" turn stages
+- Helper functions for stage classification
+
+Design principles:
 1. NEVER increase YAW and LATERAL simultaneously
-2. Maximum +2° yaw OR +1cm lateral per stage
+2. Maximum +10° yaw in turn stages, +2° in early stages
 3. Farther spawn distances for lower resolution
-4. Higher replay probability for visual learning
-
-Changes from v9.0:
-- Cleaner code structure
-- Added stage difficulty metadata for future GA optimization
-- Slightly increased min_dist for S4-S12 (visual clarity)
+4. Lower replay for blind stages to track true SSR
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -27,7 +29,7 @@ from ..utils.geometry_utils import yaw_to_quat
 
 
 # =============================================================================
-# STAGE DEFINITIONS
+# STAGE DEFINITIONS (35 STAGES)
 # =============================================================================
 
 STAGE_NAMES = [
@@ -62,14 +64,25 @@ STAGE_NAMES = [
     "Stage 21: Offset (±30°, ±8 cm)",
     "Stage 22: Offset (±30°, ±10 cm)",
     
-    # 180° turn stages (S23-S27): Large angle maneuvers
+    # Large angle stages (S23-S25): Goal still visible
     "Stage 23: Large Angle (±45°, ±8 cm)",
     "Stage 24: Large Angle (±60°, ±6 cm)",
     "Stage 25: Perpendicular (±90°, ±5 cm)",
-    "Stage 26: Rear Angle (±135°, ±4 cm)",
-    "Stage 27: Full Turn (±180°, ±3 cm)",
+    
+    # Blind search stages (S26-S34): Goal out of FOV, +10° per stage
+    "Stage 26: Blind Search (±100°, ±5 cm)",
+    "Stage 27: Blind Search (±110°, ±5 cm)",
+    "Stage 28: Blind Search (±120°, ±5 cm)",
+    "Stage 29: Blind Search (±130°, ±5 cm)",
+    "Stage 30: Blind Search (±140°, ±5 cm)",
+    "Stage 31: Blind Search (±150°, ±5 cm)",
+    "Stage 32: Blind Search (±160°, ±5 cm)",
+    "Stage 33: Blind Search (±170°, ±5 cm)",
+    "Stage 34: Full Turn (±180°, ±5 cm)",
 ]
 
+# Number of stages
+NUM_STAGES = len(STAGE_NAMES)
 
 # =============================================================================
 # STAGE CONFIGURATIONS
@@ -110,21 +123,56 @@ OFFSET_CONFIGS = {
     21: (30.0, 0.08, 0.25, 0.40),
     22: (30.0, 0.10, 0.25, 0.40),
     
-    # 180° stages (farther spawn for 84px visual clarity)
+    # Large angle stages (goal still visible/edge of FOV)
     23: (45.0,  0.08, 0.28, 0.45),
     24: (60.0,  0.06, 0.30, 0.48),
     25: (90.0,  0.05, 0.32, 0.50),
-    26: (135.0, 0.04, 0.34, 0.52),
-    27: (180.0, 0.03, 0.36, 0.54),
+    
+    # Blind search stages (goal out of FOV, +10° per stage)
+    26: (100.0, 0.05, 0.34, 0.52),
+    27: (110.0, 0.05, 0.36, 0.54),
+    28: (120.0, 0.05, 0.38, 0.56),
+    29: (130.0, 0.05, 0.40, 0.58),
+    30: (140.0, 0.05, 0.42, 0.60),
+    31: (150.0, 0.05, 0.44, 0.62),
+    32: (160.0, 0.05, 0.46, 0.64),
+    33: (170.0, 0.05, 0.48, 0.66),
+    34: (180.0, 0.05, 0.50, 0.70),
 }
 
-# Replay probabilities per stage range (tuned for 84px visual learning)
+# Replay probabilities per stage range
 REPLAY_PROBS = {
     "early": 0.15,      # S1-S6
     "micro": 0.18,      # S7-S12
     "ultra": 0.22,      # S13-S22
-    "turn": 0.25,       # S23-S27
+    "turn_visible": 0.25,   # S23-S25 (goal visible)
+    "turn_blind": 0.15,     # S26-S34 (goal out of FOV - lower to track true SSR)
 }
+
+# Stage category boundaries
+TURN_STAGE_START = 23       # S23+ are turn stages
+BLIND_STAGE_START = 26      # S26+ are blind search stages
+
+
+# =============================================================================
+# STAGE CLASSIFICATION HELPERS
+# =============================================================================
+
+def is_turn_stage(stage: int) -> bool:
+    """Check if stage is a turn stage (>=45°)."""
+    return stage >= TURN_STAGE_START
+
+
+def is_blind_stage(stage: int) -> bool:
+    """Check if stage is a blind search stage (>90°, goal out of FOV)."""
+    return stage >= BLIND_STAGE_START
+
+
+def get_stage_angle(stage: int) -> float:
+    """Get the yaw angle (in degrees) for a stage."""
+    if stage <= 3:
+        return 0.0
+    return OFFSET_CONFIGS[stage][0]
 
 
 # =============================================================================
@@ -163,8 +211,10 @@ def reset_environment_curriculum(env, env_ids: torch.Tensor) -> None:
 
 def _get_replay_probability(stage: int) -> float:
     """Get replay probability for anti-forgetting based on stage."""
-    if stage >= 23:
-        return REPLAY_PROBS["turn"]
+    if stage >= BLIND_STAGE_START:
+        return REPLAY_PROBS["turn_blind"]
+    elif stage >= TURN_STAGE_START:
+        return REPLAY_PROBS["turn_visible"]
     elif stage >= 13:
         return REPLAY_PROBS["ultra"]
     elif stage >= 7:
@@ -175,7 +225,7 @@ def _get_replay_probability(stage: int) -> float:
 
 def _reset_stage_dispatch(env, env_ids: torch.Tensor, stage: int) -> None:
     """Route to correct reset function based on stage type."""
-    if stage < 0 or stage >= len(STAGE_NAMES):
+    if stage < 0 or stage >= NUM_STAGES:
         raise ValueError(f"Invalid stage: {stage}")
 
     if stage <= 3:
@@ -257,31 +307,29 @@ def _offset_reset(
 # =============================================================================
 
 def set_curriculum_level(env, level: int) -> None:
-    """Set curriculum stage (0-27) with bounds checking."""
-    max_level = len(STAGE_NAMES) - 1
+    """Set curriculum stage (0-34) with bounds checking."""
+    max_level = NUM_STAGES - 1
     level = max(0, min(max_level, int(level)))
     env.curriculum_level = level
     
+    # Get stage info for display
+    angle = get_stage_angle(level)
+    blind_marker = " 🔍" if is_blind_stage(level) else ""
+    turn_marker = " 🔄" if is_turn_stage(level) and not is_blind_stage(level) else ""
+    
     print(f"\n{'=' * 70}")
-    print(f"[CURRICULUM] {STAGE_NAMES[level]}")
+    print(f"[CURRICULUM] {STAGE_NAMES[level]}{turn_marker}{blind_marker}")
     print(f"{'=' * 70}\n")
-
-
-def should_advance_curriculum(success_rate: float, current_level: int) -> bool:
-    """Check if should advance to next stage (legacy function)."""
-    if current_level >= len(STAGE_NAMES) - 1:
-        return False
-    return success_rate >= 0.85
 
 
 def get_stage_info(stage: int) -> dict:
     """
-    Get detailed info about a stage (useful for GA optimization).
+    Get detailed info about a stage.
     
     Returns:
-        dict with stage parameters
+        dict with stage parameters and metadata
     """
-    if stage < 0 or stage >= len(STAGE_NAMES):
+    if stage < 0 or stage >= NUM_STAGES:
         raise ValueError(f"Invalid stage: {stage}")
 
     info = {
@@ -289,6 +337,8 @@ def get_stage_info(stage: int) -> dict:
         "stage": stage,
         "type": "forward" if stage <= 3 else "offset",
         "replay_prob": _get_replay_probability(stage),
+        "is_turn_stage": is_turn_stage(stage),
+        "is_blind_stage": is_blind_stage(stage),
     }
 
     if stage <= 3:
@@ -312,5 +362,5 @@ def get_stage_info(stage: int) -> dict:
 
 
 def get_all_stage_configs() -> list[dict]:
-    """Get configurations for all stages (useful for GA optimization)."""
-    return [get_stage_info(i) for i in range(len(STAGE_NAMES))]
+    """Get configurations for all stages."""
+    return [get_stage_info(i) for i in range(NUM_STAGES)]
