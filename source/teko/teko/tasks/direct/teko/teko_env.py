@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment - Curriculum Compatible (v8.4 - GRAYSCALE 84x84)
-=================================================================
-- Supports multi-stage curriculum
+TEKO Environment - Curriculum Compatible (v8.5 - OPTIMIZED 64x64)
+==================================================================
+- 64x64 grayscale observations with FP16 frame stacking
+- Supports multi-stage curriculum (17 stages)
 - Nuclear penalties (-500 collision/boundary)
-- Frame stacking: returns stacked grayscale frames [K, H, W]
+- Frame stacking with memory optimization
 - Pure shaping + terminal rewards
 
 Author: Alexandre Schleier Neves da Silva
@@ -34,7 +35,7 @@ from .robots.teko_static import TEKOStatic
 class TekoEnv(DirectRLEnv):
     """
     Torque-driven TEKO environment with curriculum learning.
-    v8.4: 84x84 grayscale observations
+    v8.5: 64x64 grayscale observations with FP16 optimization
     """
 
     cfg: TekoEnvCfg
@@ -96,7 +97,7 @@ class TekoEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
     # ================================================================
-    # OBSERVATION SPACE (FIXED INDENTATION)
+    # OBSERVATION SPACE
     # ================================================================
     def _init_observation_space(self):
         """Define the observation space (a stack of K grayscale frames)."""
@@ -384,26 +385,27 @@ class TekoEnv(DirectRLEnv):
         )
 
     # ------------------------------------------------------------------
-    # Observations
+    # Observations (WITH FP16 OPTIMIZATION)
     # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
-        """Capture RGB, convert to grayscale, return stacked frames."""
+        """Capture RGB, convert to grayscale, return stacked frames with FP16."""
         import torch.nn.functional as F
 
         num_envs = self.scene.cfg.num_envs
         h, w = self._cam_res[1], self._cam_res[0]
 
+        # Initialize frame stack with FP16 for memory efficiency
         if self.frame_stack is None:
             self.frame_stack = torch.zeros(
                 (num_envs, self.num_frame_stack, 1, h, w),
-                device=self.device, dtype=torch.float32,
+                device=self.device, dtype=torch.float16,  # ← FP16 for VRAM
             )
         if self.frame_counts is None:
             self.frame_counts = torch.zeros(
                 num_envs, device=self.device, dtype=torch.int32
             )
 
-        gray_current = torch.zeros((num_envs, 1, h, w), device=self.device)
+        gray_current = torch.zeros((num_envs, 1, h, w), device=self.device, dtype=torch.float16)
 
         for env_idx, cam in enumerate(self.cameras):
             cam.update(dt=0.0)
@@ -425,7 +427,7 @@ class TekoEnv(DirectRLEnv):
                 ).squeeze(0)
 
             gray = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-            gray = gray.unsqueeze(0)
+            gray = gray.unsqueeze(0).half()  # ← Convert to FP16
             gray_current[env_idx] = gray
 
         reset_mask = self.frame_counts == 0
@@ -440,7 +442,8 @@ class TekoEnv(DirectRLEnv):
             self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
             self.frame_stack[idx, -1] = gray_current[idx]
 
-        stacked = self.frame_stack.squeeze(2)
+        # Convert back to FP32 for policy (AMP will handle the rest)
+        stacked = self.frame_stack.squeeze(2).float()
         return {"rgb": stacked}
 
     # ------------------------------------------------------------------

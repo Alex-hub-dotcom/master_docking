@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-TEKO PPO TRAINING (v10.2 - 35-STAGE BLIND SEARCH EDITION)
-=========================================================
+TEKO PPO TRAINING (v11.0 - 17-STAGE LOW-SAMPLE OPTIMIZED)
+==========================================================
 
 Optimized for:
-- 84×84 grayscale input with SimpleCNN v9.6
-- 35-stage curriculum with micro-steps to 180°
-- Stage-aware thresholds, entropy, and step limits
+- 64×64 grayscale input with SimpleCNN v9.7
+- 17-stage streamlined curriculum
+- 65-100 parallel environments (VRAM-limited)
+- Mixed precision training (AMP)
+- More PPO epochs for better sample efficiency
+- Balanced quality thresholds
 
-Key changes from v10.1:
-- Extended MAX_STAGE_STEPS for blind stages (S26+)
-- Lower SSR thresholds for blind stages
-- Higher entropy for exploration in blind stages
-- Separate rehearsal settings for blind stages
-- Better logging with angle info
+Key optimizations:
+- 6 PPO epochs (vs 3) for more gradient updates
+- Longer rollouts (256 vs 128) for more data
+- Mixed precision for VRAM efficiency
+- Lower minimum steps per stage
+- Minimal replay for accurate SSR
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -44,21 +47,21 @@ HYPERPARAMS = {
     "value_clip": 0.2,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
-    "min_stage_steps": 50_000,
+    "min_stage_steps": 40_000,  # Reduced from 50k for faster progression
 }
 
 # Stage-specific max steps (safety valve)
-MAX_STAGE_STEPS_DEFAULT = 1_000_000
-MAX_STAGE_STEPS_TURN = 1_500_000       # S23-S25 (goal visible)
-MAX_STAGE_STEPS_BLIND = 2_500_000      # S26+ (blind search needs more time)
+MAX_STAGE_STEPS_DEFAULT = 800_000
+MAX_STAGE_STEPS_TURN = 1_200_000      # S8-S10 (goal visible)
+MAX_STAGE_STEPS_BLIND = 2_000_000     # S11+ (blind search needs more time)
 
 CHECKPOINT_INTERVAL = 30_000
 
 # Rehearsal settings
 REHEARSAL_ENABLED = True
 REHEARSAL_MIN_STAGE = 2
-REHEARSAL_MAX_HISTORY = 4              # Look back further for blind stages
-REHEARSAL_INTERVAL_STEPS = 150_000     # Less frequent to allow learning
+REHEARSAL_MAX_HISTORY = 3
+REHEARSAL_INTERVAL_STEPS = 150_000
 REHEARSAL_ROLLOUT_LEN = 32
 REHEARSAL_UPDATES = 2
 
@@ -66,35 +69,33 @@ args = None
 
 
 # =============================================================================
-# CURRICULUM FUNCTIONS (STAGE-AWARE)
+# CURRICULUM FUNCTIONS (STAGE-AWARE, BALANCED THRESHOLDS)
 # =============================================================================
 
 def get_stage_threshold(level: int, is_blind: bool = False) -> float:
     """
     Success rate threshold to advance.
-    Lower for blind stages since they're qualitatively harder.
+    Balanced: not too easy, not impossible.
     """
     if level <= 0:
-        return 0.80
-    elif level <= 4:
-        return 0.75
-    elif level <= 6:
-        return 0.70
-    elif level <= 12:
-        return 0.60
-    elif level <= 22:
-        return 0.58
-    elif level <= 25:  # Turn stages (goal visible)
+        return 0.75  # Baby steps
+    elif level <= 2:
+        return 0.70  # Forward stages
+    elif level <= 5:
+        return 0.65  # Small offsets
+    elif level <= 7:
+        return 0.60  # Medium/large offsets
+    elif level <= 10:  # Turn stages (goal visible)
         return 0.55
-    else:  # Blind stages S26+
-        return 0.45  # Lower threshold - blind search is hard
+    else:  # Blind stages S11+
+        return 0.45  # Lower for blind search
 
 
 def get_max_stage_steps(level: int, is_blind: bool = False) -> int:
     """Get max steps allowed per stage before safety valve."""
-    if is_blind or level >= 26:
+    if is_blind or level >= 11:
         return MAX_STAGE_STEPS_BLIND
-    elif level >= 23:
+    elif level >= 8:
         return MAX_STAGE_STEPS_TURN
     else:
         return MAX_STAGE_STEPS_DEFAULT
@@ -105,20 +106,18 @@ def get_entropy_coef(level: int, is_blind: bool = False) -> float:
     Entropy coefficient per curriculum stage.
     Higher for blind stages to encourage exploration.
     """
-    if level <= 6:
+    if level <= 5:
         return 0.05
-    elif level <= 12:
+    elif level <= 7:
         return 0.06
-    elif level <= 22:
-        return 0.05
-    elif level <= 25:  # Turn stages (goal visible)
+    elif level <= 10:  # Turn stages (goal visible)
         return 0.06
-    else:  # Blind stages S26+
-        return 0.08  # Higher entropy for exploration
+    else:  # Blind stages S11+
+        return 0.08
 
 
 # =============================================================================
-# PPO CORE FUNCTIONS
+# PPO CORE FUNCTIONS (WITH MIXED PRECISION)
 # =============================================================================
 
 def compute_gae(rewards, values, dones, gamma, lam):
@@ -138,7 +137,7 @@ def compute_gae(rewards, values, dones, gamma, lam):
 
 def ppo_update(policy, optimizer, obs, actions, logp_old,
                advantages, returns,
-               epochs=3, batch_size=2048,
+               epochs=6, batch_size=1024,
                clip_ratio=0.15, value_clip=0.2,
                entropy_coef=0.05, value_coef=0.5,
                max_grad_norm=0.5):
@@ -156,6 +155,9 @@ def ppo_update(policy, optimizer, obs, actions, logp_old,
     adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
     p_losses, v_losses, entropies, grad_norms = [], [], [], []
+    
+    # Mixed precision scaler
+    scaler = torch.cuda.amp.GradScaler()
 
     for _ in range(epochs):
         idx = torch.randperm(total)
@@ -168,28 +170,32 @@ def ppo_update(policy, optimizer, obs, actions, logp_old,
             mb_adv = adv_flat[mb].to(device)
             mb_ret = ret_flat[mb].to(device)
 
-            logp, value, entropy = policy.evaluate(mb_obs, mb_act)
-            ratio = (logp - mb_logp).exp()
-
-            p_loss = -torch.min(
-                ratio * mb_adv,
-                torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * mb_adv
-            ).mean()
-
-            if value_clip:
-                value = torch.clamp(value, mb_ret - value_clip, mb_ret + value_clip)
-            v_loss = F.mse_loss(value, mb_ret)
-
-            loss = p_loss + value_coef * v_loss - entropy_coef * entropy.mean()
-
             optimizer.zero_grad()
-            loss.backward()
+            
+            # Forward pass with automatic mixed precision
+            with torch.cuda.amp.autocast():
+                logp, value, entropy = policy.evaluate(mb_obs, mb_act)
+                ratio = (logp - mb_logp).exp()
 
+                p_loss = -torch.min(
+                    ratio * mb_adv,
+                    torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * mb_adv
+                ).mean()
+
+                if value_clip:
+                    value = torch.clamp(value, mb_ret - value_clip, mb_ret + value_clip)
+                v_loss = F.mse_loss(value, mb_ret)
+
+                loss = p_loss + value_coef * v_loss - entropy_coef * entropy.mean()
+
+            # Backward pass with gradient scaling
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm).item()
+            scaler.step(optimizer)
+            scaler.update()
+
             grad_norms.append(grad_norm)
-
-            optimizer.step()
-
             p_losses.append(p_loss.item())
             v_losses.append(v_loss.item())
             entropies.append(entropy.mean().item())
@@ -246,8 +252,8 @@ class Policy(nn.Module):
             feature_dim=256,
             pretrained=False,
             num_frame_stack=4,
-            input_h=84,
-            input_w=84,
+            input_h=64,
+            input_w=64,
         )
 
         self.actor = nn.Sequential(
@@ -341,12 +347,36 @@ def log_metrics(writer, step, metrics):
         writer.add_scalar(key, value, step)
 
 
+def log_vram_usage(writer, step):
+    """Log GPU VRAM usage to TensorBoard."""
+    if not torch.cuda.is_available():
+        return
+    
+    allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)  # GB
+    reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)    # GB
+    max_allocated = torch.cuda.max_memory_allocated(0) / (1024 ** 3)  # GB
+    
+    # Get total GPU memory
+    total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # GB
+    
+    # Calculate percentages
+    allocated_pct = (allocated / total_memory) * 100
+    reserved_pct = (reserved / total_memory) * 100
+    
+    writer.add_scalar("system/vram_allocated_gb", allocated, step)
+    writer.add_scalar("system/vram_reserved_gb", reserved, step)
+    writer.add_scalar("system/vram_max_allocated_gb", max_allocated, step)
+    writer.add_scalar("system/vram_allocated_percent", allocated_pct, step)
+    writer.add_scalar("system/vram_reserved_percent", reserved_pct, step)
+    writer.add_scalar("system/vram_total_gb", total_memory, step)
+
+
 # =============================================================================
 # CURRICULUM MANAGEMENT
 # =============================================================================
 
 def do_stage_mixing(env, policy, optimizer, device, current_stage,
-                    num_iterations=40, rollout_len=16, epochs=3, batch_size=2048):
+                    num_iterations=40, rollout_len=16, epochs=6, batch_size=1024):
     print(f"🔄 Mixing S{current_stage} ↔ S{current_stage + 1}...")
 
     for i in range(num_iterations):
@@ -365,12 +395,12 @@ def do_stage_mixing(env, policy, optimizer, device, current_stage,
             data[0], data[1], data[4], adv, ret,
             epochs=epochs,
             batch_size=batch_size,
-            entropy_coef=get_entropy_coef(stage, stage >= 26),
+            entropy_coef=get_entropy_coef(stage, stage >= 11),
         )
 
 
 def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
-                 num_updates=4, rollout_len=32, epochs=3, batch_size=2048):
+                 num_updates=2, rollout_len=32, epochs=6, batch_size=1024):
     candidates = [
         s for s in mastered_stages
         if max(0, current_stage - REHEARSAL_MAX_HISTORY) <= s < current_stage
@@ -396,7 +426,7 @@ def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
             data[0], data[1], data[4], adv, ret,
             epochs=epochs,
             batch_size=batch_size,
-            entropy_coef=get_entropy_coef(r_stage, r_stage >= 26),  # Fixed
+            entropy_coef=get_entropy_coef(r_stage, r_stage >= 11),
         )
 
     return True
@@ -407,17 +437,17 @@ def do_rehearsal(env, policy, optimizer, device, current_stage, mastered_stages,
 # =============================================================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="TEKO PPO Training (35-Stage)")
+    parser = argparse.ArgumentParser(description="TEKO PPO Training (17-Stage Optimized)")
 
-    parser.add_argument("--num_envs", type=int, default=60)
-    parser.add_argument("--steps", type=int, default=150_000_000)  # More steps for 35 stages
+    parser.add_argument("--num_envs", type=int, default=65)
+    parser.add_argument("--steps", type=int, default=200_000_000)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_min", type=float, default=1e-5)
-    parser.add_argument("--rollout_len", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=2048)
+    parser.add_argument("--rollout_len", type=int, default=256)  # Longer rollouts
+    parser.add_argument("--epochs", type=int, default=6)  # More epochs
+    parser.add_argument("--batch_size", type=int, default=1024)  # Smaller batches
 
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--no_lr_decay", action="store_true", help="Disable LR scheduler")
@@ -436,10 +466,11 @@ def main():
     args.enable_cameras = True
 
     print("\n" + "=" * 75)
-    print("🎓 TEKO - 35-STAGE CURRICULUM (84×84 GRAYSCALE, PPO v10.2)")
+    print("🎓 TEKO - 17-STAGE CURRICULUM (64×64 GRAYSCALE, PPO v11.0)")
     print("=" * 75)
     print(f"Envs: {args.num_envs} | Steps: {args.steps:,}")
     print(f"LR: {args.lr} → {args.lr_min} | Batch: {args.batch_size} | Rollout: {args.rollout_len}")
+    print(f"Epochs: {args.epochs} | Mixed Precision: Enabled")
     print("=" * 75 + "\n")
 
     torch.manual_seed(args.seed)
@@ -505,6 +536,15 @@ def main():
         total_params = sum(p.numel() for p in policy.parameters())
         trainable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         print(f"🧠 Model: {total_params:,} params ({trainable_params:,} trainable)\n")
+        
+        # Log initial VRAM usage
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
+            total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            print(f"💾 VRAM: {allocated:.2f} / {total_memory:.2f} GB allocated ({allocated/total_memory*100:.1f}%)")
+            print(f"💾 VRAM: {reserved:.2f} / {total_memory:.2f} GB reserved ({reserved/total_memory*100:.1f}%)\n")
 
         obs_dict, _ = env.reset()
         obs = obs_dict["rgb"].to(device)
@@ -514,7 +554,6 @@ def main():
         ep_successes = deque(maxlen=100)
         stage_successes = deque(maxlen=200)
         
-        # Track successes and timeouts separately
         recent_successes = deque(maxlen=50)
         recent_timeouts = deque(maxlen=50)
 
@@ -610,7 +649,6 @@ def main():
             if scheduler:
                 scheduler.step()
 
-            # Log metrics
             log_metrics(writer, step, {
                 "train/reward": mean_r,
                 "train/episode_length": mean_len,
@@ -631,24 +669,33 @@ def main():
                 "policy/log_std_v": policy.log_std_v.item(),
                 "policy/log_std_w": policy.log_std_w.item(),
             })
+            
+            # Log VRAM usage every iteration
+            log_vram_usage(writer, step)
 
-            # Log reward components
             if hasattr(env, "reward_components"):
                 for k, v in env.reward_components.items():
                     if v:
                         writer.add_scalar(f"rewards/{k}", np.mean(v), step)
                     env.reward_components[k].clear()
 
-            # Console output with stage info
             stage_marker = "🔍" if is_blind else ("🔄" if is_turn else "  ")
+            
+            # Add VRAM info every 10 iterations
+            vram_str = ""
+            if step % (args.rollout_len * args.num_envs * 10) < (args.rollout_len * args.num_envs):
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)
+                    total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                    vram_str = f" | VRAM={allocated:.1f}/{total_memory:.1f}GB"
+            
             print(
                 f"[{step:9d}] S{stage:02d} ({angle:3.0f}°) {stage_marker} | "
                 f"R={mean_r:6.1f} | Succ={success_count:2.0f}/50 T/O={timeout_count:2.0f} | "
                 f"SSR={ssr*100:4.1f}% >{threshold*100:.0f}% | "
-                f"Steps={steps_in_stage/1e6:.2f}M/{max_steps/1e6:.1f}M"
+                f"Steps={steps_in_stage/1e6:.2f}M/{max_steps/1e6:.1f}M{vram_str}"
             )
 
-            # Check for stage advancement
             if steps_in_stage >= HYPERPARAMS["min_stage_steps"]:
                 advance = False
                 mastered_now = False
@@ -687,7 +734,6 @@ def main():
                     next_angle = get_stage_angle(stage + 1)
                     print(f"➡️ Advanced to S{stage + 1} ({next_angle}°)")
 
-            # Rehearsal
             if (REHEARSAL_ENABLED and mastered and
                 env.curriculum_level >= REHEARSAL_MIN_STAGE and
                 step - last_rehearsal >= REHEARSAL_INTERVAL_STEPS):
@@ -708,7 +754,6 @@ def main():
                     last_rehearsal = step
                     print(f"✅ Back to S{stage}")
 
-            # Checkpointing
             if step - last_ckpt >= CHECKPOINT_INTERVAL:
                 path = f"{log_dir}/ckpt_{step}.pt"
                 save_checkpoint(

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment Configuration (Torque-driven, Modular)
+TEKO Environment Configuration (Optimized for Low-VRAM)
 -------------------------------------------------------
 Optimized for:
-- 84×84 grayscale observations (4-frame stack)
-- 60 parallel environments
+- 64×64 grayscale observations (4-frame stack)
+- 65-100 parallel environments (VRAM-limited)
+- Mixed precision training support
 
 Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
 """
@@ -58,10 +59,10 @@ class TekoEnvCfg(DirectRLEnvCfg):
     )
 
     # ------------------------------------------------------------------
-    # Scene
+    # Scene (Start with 65, test up to 100 with 64x64)
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=60,
+        num_envs=65,  # Try increasing to 80-100 if VRAM allows
         env_spacing=6.0,
         replicate_physics=True,
     )
@@ -93,7 +94,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
     # ------------------------------------------------------------------
-    # Camera Configuration (84×84)
+    # Camera Configuration (64×64 for VRAM efficiency)
     # ------------------------------------------------------------------
     @configclass
     class CameraCfg:
@@ -104,8 +105,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
             "TEKO_WallBack/TEKO_Camera/RearCamera"
         )
 
-        width = 84
-        height = 84
+        width = 64   # Reduced from 84 for VRAM
+        height = 64  # ~44% less pixels than 84x84
 
         frequency_hz = 15
         focal_length = 3.6
@@ -139,5 +140,5 @@ class TekoEnvCfg(DirectRLEnvCfg):
     action_space = (2,)
 
     observation_space = {
-        "rgb": (4, 84, 84),
+        "rgb": (4, 64, 64),  # 4 grayscale frames at 64x64
     }

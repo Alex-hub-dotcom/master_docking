@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-35-STAGE CURRICULUM FOR TEKO (v10.1 – STABILIZED)
-=================================================
+17-STAGE CURRICULUM FOR TEKO (v11.0 – LOW-SAMPLE OPTIMIZED)
+============================================================
 
-Optimized for 84×84 grayscale vision-based docking with
-smooth progression into blind search regime.
+Optimized for 64×64 grayscale vision-based docking with
+limited parallel environments (65-100).
 
-Key changes from v10.0:
-- Reduced replay probabilities to minimize SSR contamination
-- Lower replay especially for ultra-micro stages (S13-S22)
-- More accurate SSR tracking = more stable advancement
+Key changes from 35-stage version:
+- Consolidated to 17 stages (removed micro-steps)
+- Minimal replay to ensure accurate SSR tracking
+- Balanced thresholds (not too easy, not impossible)
+- Larger yaw jumps are safe with fewer stages
 
 Design principles:
-1. NEVER increase YAW and LATERAL simultaneously
-2. Maximum +10° yaw in turn stages, +2° in early stages
-3. Farther spawn distances for lower resolution
-4. Lower replay for accurate SSR tracking
+1. Each stage is meaningfully different
+2. Progression is smooth but not overly gradual
+3. Lower replay = more accurate success metrics
+4. Quality over quantity of stages
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -28,56 +29,34 @@ from ..utils.geometry_utils import yaw_to_quat
 
 
 # =============================================================================
-# STAGE DEFINITIONS (35 STAGES)
+# STAGE DEFINITIONS (17 STAGES)
 # =============================================================================
 
 STAGE_NAMES = [
-    # Forward stages (S0-S3): Learn basic approach
-    "Stage 0:  Baby Steps (5–12 cm, forward)",
-    "Stage 1:  Forward 1 (10–18 cm, forward)",
-    "Stage 2:  Forward 2 (15–25 cm, forward)",
-    "Stage 3:  Medium Forward (20–35 cm, forward)",
+    # Forward stages (S0-S2): Learn basic approach
+    "Stage 0:  Baby Steps (5–15 cm, forward)",
+    "Stage 1:  Forward (15–30 cm, forward)",
+    "Stage 2:  Long Forward (25–40 cm, forward)",
     
-    # First offsets (S4-S6): Introduce small corrections
-    "Stage 4:  Tiny Offset (±4°, ±2 cm)",
-    "Stage 5:  Small Offset (±7°, ±3 cm)",
-    "Stage 6:  Offset (±10°, ±3 cm)",
+    # Offset stages (S3-S7): Introduce corrections
+    "Stage 3:  Small Offset (±5°, ±2 cm)",
+    "Stage 4:  Offset (±10°, ±3 cm)",
+    "Stage 5:  Offset (±15°, ±4 cm)",
+    "Stage 6:  Medium Offset (±20°, ±6 cm)",
+    "Stage 7:  Large Offset (±30°, ±8 cm)",
     
-    # Micro-steps (S7-S12): Gradual yaw increase
-    "Stage 7:  Offset (±11°, ±3 cm)",
-    "Stage 8:  Offset (±12°, ±3 cm)",
-    "Stage 9:  Offset (±13°, ±3 cm)",
-    "Stage 10: Offset (±15°, ±3 cm)",
-    "Stage 11: Offset (±17°, ±3 cm)",
-    "Stage 12: Offset (±19°, ±4 cm)",
+    # Turn stages (S8-S10): Goal still visible
+    "Stage 8:  Large Turn (±45°, ±8 cm)",
+    "Stage 9:  Big Turn (±60°, ±6 cm)",
+    "Stage 10: Right Angle (±90°, ±5 cm)",
     
-    # Ultra micro-steps (S13-S22): Fine-grained progression
-    "Stage 13: Offset (±20°, ±4 cm)",
-    "Stage 14: Offset (±20°, ±5 cm)",
-    "Stage 15: Offset (±20°, ±6 cm)",
-    "Stage 16: Offset (±22°, ±6 cm)",
-    "Stage 17: Offset (±24°, ±6 cm)",
-    "Stage 18: Offset (±24°, ±7 cm)",
-    "Stage 19: Offset (±24°, ±8 cm)",
-    "Stage 20: Offset (±27°, ±8 cm)",
-    "Stage 21: Offset (±30°, ±8 cm)",
-    "Stage 22: Offset (±30°, ±10 cm)",
-    
-    # Large angle stages (S23-S25): Goal still visible
-    "Stage 23: Large Angle (±45°, ±8 cm)",
-    "Stage 24: Large Angle (±60°, ±6 cm)",
-    "Stage 25: Perpendicular (±90°, ±5 cm)",
-    
-    # Blind search stages (S26-S34): Goal out of FOV, +10° per stage
-    "Stage 26: Blind Search (±100°, ±5 cm)",
-    "Stage 27: Blind Search (±110°, ±5 cm)",
-    "Stage 28: Blind Search (±120°, ±5 cm)",
-    "Stage 29: Blind Search (±130°, ±5 cm)",
-    "Stage 30: Blind Search (±140°, ±5 cm)",
-    "Stage 31: Blind Search (±150°, ±5 cm)",
-    "Stage 32: Blind Search (±160°, ±5 cm)",
-    "Stage 33: Blind Search (±170°, ±5 cm)",
-    "Stage 34: Full Turn (±180°, ±5 cm)",
+    # Blind search stages (S11-S16): Goal out of FOV
+    "Stage 11: Blind (±105°, ±5 cm)",
+    "Stage 12: Blind (±120°, ±5 cm)",
+    "Stage 13: Blind (±135°, ±5 cm)",
+    "Stage 14: Blind (±150°, ±5 cm)",
+    "Stage 15: Blind (±165°, ±5 cm)",
+    "Stage 16: Full Circle (±180°, ±5 cm)",
 ]
 
 # Number of stages
@@ -89,73 +68,48 @@ NUM_STAGES = len(STAGE_NAMES)
 
 # Forward stages: (min_dist, max_dist)
 FORWARD_CONFIGS = {
-    0: (0.05, 0.12),
-    1: (0.10, 0.18),
-    2: (0.15, 0.25),
-    3: (0.20, 0.35),
+    0: (0.05, 0.15),
+    1: (0.15, 0.30),
+    2: (0.25, 0.40),
 }
 
 # Offset stages: (angle_deg, lateral_m, min_dist, max_dist)
 OFFSET_CONFIGS = {
-    # First offsets (softened yaw for 84px)
-    4:  (4.0,  0.02, 0.25, 0.36),
-    5:  (7.0,  0.03, 0.25, 0.37),
-    6:  (10.0, 0.03, 0.25, 0.38),
-    
-    # Micro-steps
-    7:  (11.0, 0.03, 0.25, 0.38),
-    8:  (12.0, 0.03, 0.25, 0.38),
-    9:  (13.0, 0.03, 0.25, 0.38),
-    10: (15.0, 0.03, 0.25, 0.38),
-    11: (17.0, 0.03, 0.25, 0.38),
-    12: (19.0, 0.04, 0.25, 0.38),
-    
-    # Ultra micro-steps
-    13: (20.0, 0.04, 0.25, 0.38),
-    14: (20.0, 0.05, 0.25, 0.38),
-    15: (20.0, 0.06, 0.25, 0.38),
-    16: (22.0, 0.06, 0.25, 0.40),
-    17: (24.0, 0.06, 0.25, 0.40),
-    18: (24.0, 0.07, 0.25, 0.40),
-    19: (24.0, 0.08, 0.25, 0.40),
-    20: (27.0, 0.08, 0.25, 0.40),
-    21: (30.0, 0.08, 0.25, 0.40),
-    22: (30.0, 0.10, 0.25, 0.40),
+    # First offsets
+    3:  (5.0,  0.02, 0.25, 0.36),
+    4:  (10.0, 0.03, 0.25, 0.38),
+    5:  (15.0, 0.04, 0.25, 0.40),
+    6:  (20.0, 0.06, 0.25, 0.40),
+    7:  (30.0, 0.08, 0.25, 0.42),
     
     # Large angle stages (goal still visible/edge of FOV)
-    23: (45.0,  0.08, 0.28, 0.45),
-    24: (60.0,  0.06, 0.30, 0.48),
-    25: (90.0,  0.05, 0.32, 0.50),
+    8:  (45.0,  0.08, 0.28, 0.45),
+    9:  (60.0,  0.06, 0.30, 0.48),
+    10: (90.0,  0.05, 0.32, 0.50),
     
-    # Blind search stages (goal out of FOV, +10° per stage)
-    26: (100.0, 0.05, 0.34, 0.52),
-    27: (110.0, 0.05, 0.36, 0.54),
-    28: (120.0, 0.05, 0.38, 0.56),
-    29: (130.0, 0.05, 0.40, 0.58),
-    30: (140.0, 0.05, 0.42, 0.60),
-    31: (150.0, 0.05, 0.44, 0.62),
-    32: (160.0, 0.05, 0.46, 0.64),
-    33: (170.0, 0.05, 0.48, 0.66),
-    34: (180.0, 0.05, 0.50, 0.70),
+    # Blind search stages (goal out of FOV, +15° per stage)
+    11: (105.0, 0.05, 0.34, 0.52),
+    12: (120.0, 0.05, 0.36, 0.54),
+    13: (135.0, 0.05, 0.38, 0.56),
+    14: (150.0, 0.05, 0.40, 0.58),
+    15: (165.0, 0.05, 0.42, 0.60),
+    16: (180.0, 0.05, 0.45, 0.65),
 }
 
 # =============================================================================
-# REPLAY PROBABILITIES (v10.1 - REDUCED FOR STABILITY)
+# REPLAY PROBABILITIES (MINIMAL FOR ACCURATE SSR)
 # =============================================================================
-# Lower replay = more accurate SSR tracking = less oscillation
-# The policy learns current stage without contamination from easier stages
 
 REPLAY_PROBS = {
-    "early": 0.12,          # S1-S6   (was 0.15)
-    "micro": 0.12,          # S7-S12  (was 0.18)
-    "ultra": 0.12,          # S13-S22 (was 0.22 - this was too high!)
-    "turn_visible": 0.15,   # S23-S25 (was 0.25)
-    "turn_blind": 0.10,     # S26-S34 (was 0.15)
+    "early": 0.05,          # S1-S5
+    "medium": 0.05,         # S6-S7
+    "turn_visible": 0.08,   # S8-S10
+    "turn_blind": 0.03,     # S11-S16 (minimal replay)
 }
 
 # Stage category boundaries
-TURN_STAGE_START = 23       # S23+ are turn stages
-BLIND_STAGE_START = 26      # S26+ are blind search stages
+TURN_STAGE_START = 8        # S8+ are turn stages
+BLIND_STAGE_START = 11      # S11+ are blind search stages
 
 
 # =============================================================================
@@ -174,7 +128,7 @@ def is_blind_stage(stage: int) -> bool:
 
 def get_stage_angle(stage: int) -> float:
     """Get the yaw angle (in degrees) for a stage."""
-    if stage <= 3:
+    if stage <= 2:
         return 0.0
     return OFFSET_CONFIGS[stage][0]
 
@@ -187,7 +141,7 @@ def reset_environment_curriculum(env, env_ids: torch.Tensor) -> None:
     """
     Reset environments according to current curriculum stage.
     
-    Includes replay of previous stage for anti-forgetting.
+    Includes minimal replay of previous stage for anti-forgetting.
     """
     current_stage = int(env.curriculum_level)
     num = len(env_ids)
@@ -219,10 +173,8 @@ def _get_replay_probability(stage: int) -> float:
         return REPLAY_PROBS["turn_blind"]
     elif stage >= TURN_STAGE_START:
         return REPLAY_PROBS["turn_visible"]
-    elif stage >= 13:
-        return REPLAY_PROBS["ultra"]
-    elif stage >= 7:
-        return REPLAY_PROBS["micro"]
+    elif stage >= 6:
+        return REPLAY_PROBS["medium"]
     else:
         return REPLAY_PROBS["early"]
 
@@ -232,7 +184,7 @@ def _reset_stage_dispatch(env, env_ids: torch.Tensor, stage: int) -> None:
     if stage < 0 or stage >= NUM_STAGES:
         raise ValueError(f"Invalid stage: {stage}")
 
-    if stage <= 3:
+    if stage <= 2:
         # Forward stages
         min_d, max_d = FORWARD_CONFIGS[stage]
         _forward_reset(env, env_ids, min_d, max_d)
@@ -311,7 +263,7 @@ def _offset_reset(
 # =============================================================================
 
 def set_curriculum_level(env, level: int) -> None:
-    """Set curriculum stage (0-34) with bounds checking."""
+    """Set curriculum stage (0-16) with bounds checking."""
     max_level = NUM_STAGES - 1
     level = max(0, min(max_level, int(level)))
     env.curriculum_level = level
@@ -339,13 +291,13 @@ def get_stage_info(stage: int) -> dict:
     info = {
         "name": STAGE_NAMES[stage],
         "stage": stage,
-        "type": "forward" if stage <= 3 else "offset",
+        "type": "forward" if stage <= 2 else "offset",
         "replay_prob": _get_replay_probability(stage),
         "is_turn_stage": is_turn_stage(stage),
         "is_blind_stage": is_blind_stage(stage),
     }
 
-    if stage <= 3:
+    if stage <= 2:
         min_d, max_d = FORWARD_CONFIGS[stage]
         info.update({
             "min_dist": min_d,

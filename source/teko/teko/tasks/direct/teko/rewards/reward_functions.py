@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward Functions for TEKO Docking (v9.1 – 84px FINAL)
-=====================================================
+Reward Functions for TEKO Docking (v9.2 – 64px OPTIMIZED)
+==========================================================
 
-Optimized for 84×84 grayscale vision-based docking.
+Optimized for 64×64 grayscale vision-based docking.
 
-Key 84px adjustments from v8.9:
-- Alignment scale: 0.30 → 0.20 (less aggressive corrections)
-- Progress scale: 10.0 → 8.0 (smoother learning)
-- Turning bonus: 0.20 → 0.35 (encourage rotation when misaligned)
-- Facing threshold: 15° → 20° (more forgiving at lower resolution)
+Key 64px adjustments from v9.1:
+- Alignment scale: 0.20 (maintained - works well)
+- Progress scale: 8.0 (maintained)
+- Turning bonus: 0.35 (maintained)
+- Facing threshold: 20° (maintained)
+- Time penalty: SOFTENED for better exploration
 
 Reward structure:
 1. Distance reward     - Continuous penalty for being far
@@ -21,7 +22,7 @@ Reward structure:
 7. Collision penalty   - Terminal penalty for crashes
 8. Boundary penalty    - Terminal penalty for leaving arena
 9. Success bonus       - Terminal reward for docking
-10. Time penalty       - Exponential penalty for slow episodes
+10. Time penalty       - Gentle penalty for slow episodes (SOFTENED)
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -32,7 +33,7 @@ import numpy as np
 
 
 # =============================================================================
-# REWARD HYPERPARAMETERS (for easy GA optimization)
+# REWARD HYPERPARAMETERS
 # =============================================================================
 
 REWARD_CONFIG = {
@@ -41,19 +42,19 @@ REWARD_CONFIG = {
     "distance_min": -4.0,
     "distance_max": 0.0,
     
-    "progress_scale": 8.0,          # v8.9: 10.0 → 84px: 8.0
+    "progress_scale": 8.0,
     "progress_min": -4.0,
     "progress_max": 4.0,
     
-    "alignment_scale": 0.20,        # v8.9: 0.30 → 84px: 0.20
+    "alignment_scale": 0.20,
     
     "facing_bonus": 1.0,
-    "facing_threshold_deg": 20.0,   # v8.9: 15° → 84px: 20°
+    "facing_threshold_deg": 20.0,
     "facing_distance": 0.25,
     
     "approach_scale": 2.0,
     
-    "turning_bonus": 0.35,          # v8.9: 0.20 → 84px: 0.35
+    "turning_bonus": 0.35,
     "turning_threshold_deg": 20.0,
     
     # Terminal rewards
@@ -67,10 +68,10 @@ REWARD_CONFIG = {
     "success_distance": 0.03,
     "success_min_steps": 5,
     
-    # Time penalty
-    "time_base": -0.02,
-    "time_exp_factor": 4.0,
-    "time_scale": 50.0,
+    # Time penalty (SOFTENED for better exploration)
+    "time_base": -0.01,         # was -0.02
+    "time_exp_factor": 2.0,     # was 4.0 - less exponential
+    "time_scale": 25.0,         # was 50.0 - less aggressive
     
     # Clipping
     "reward_min": -500.0,
@@ -186,6 +187,7 @@ def _compute_turning_bonus(yaw_error: torch.Tensor, yaw_error_abs: torch.Tensor,
         torch.zeros_like(surface_xy),
     )
 
+
 def _compute_collision_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
     """Terminal penalty for collisions."""
     cfg = REWARD_CONFIG
@@ -256,7 +258,7 @@ def _compute_success_bonus(env, surface_xy: torch.Tensor) -> torch.Tensor:
 
 
 def _compute_time_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
-    """Exponential time penalty to encourage fast completion."""
+    """Gentle time penalty to encourage efficiency (SOFTENED)."""
     cfg = REWARD_CONFIG
     
     max_ep_len = float(env.max_episode_length)
@@ -264,7 +266,7 @@ def _compute_time_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
     length_ratio = ep_len.float() / max_ep_len
     
     exp_factor = torch.exp(cfg["time_exp_factor"] * length_ratio) - 1.0
-    exp_factor = exp_factor / 54.0  # Normalization
+    exp_factor = exp_factor / (np.exp(cfg["time_exp_factor"]) - 1.0)  # Normalize
     
     return cfg["time_base"] * (1.0 + cfg["time_scale"] * exp_factor)
 
@@ -362,11 +364,11 @@ def _log_rewards(env, rewards: dict) -> None:
 # =============================================================================
 
 def get_reward_config() -> dict:
-    """Get current reward configuration (for GA optimization)."""
+    """Get current reward configuration."""
     return REWARD_CONFIG.copy()
 
 
 def set_reward_config(new_config: dict) -> None:
-    """Update reward configuration (for GA optimization)."""
+    """Update reward configuration."""
     global REWARD_CONFIG
     REWARD_CONFIG.update(new_config)
