@@ -58,9 +58,9 @@ CHECKPOINT_INTERVAL = 30_000
 REHEARSAL_ENABLED = True
 REHEARSAL_MIN_STAGE = 2
 REHEARSAL_MAX_HISTORY = 4              # Look back further for blind stages
-REHEARSAL_INTERVAL_STEPS = 100_000     # Less frequent to allow learning
+REHEARSAL_INTERVAL_STEPS = 150_000     # Less frequent to allow learning
 REHEARSAL_ROLLOUT_LEN = 32
-REHEARSAL_UPDATES = 4
+REHEARSAL_UPDATES = 2
 
 args = None
 

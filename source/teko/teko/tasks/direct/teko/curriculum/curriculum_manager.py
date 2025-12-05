@@ -1,22 +1,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-35-STAGE CURRICULUM FOR TEKO (v10.0 – 180° MICRO-STEPS)
-=======================================================
+35-STAGE CURRICULUM FOR TEKO (v10.1 – STABILIZED)
+=================================================
 
 Optimized for 84×84 grayscale vision-based docking with
 smooth progression into blind search regime.
 
-Key changes from v9.1:
-- Added micro-steps from 90° to 180° (+10° per stage)
-- All turn stages use ±5cm lateral (proof-of-concept)
-- Separate replay probs for "visible" vs "blind" turn stages
-- Helper functions for stage classification
+Key changes from v10.0:
+- Reduced replay probabilities to minimize SSR contamination
+- Lower replay especially for ultra-micro stages (S13-S22)
+- More accurate SSR tracking = more stable advancement
 
 Design principles:
 1. NEVER increase YAW and LATERAL simultaneously
 2. Maximum +10° yaw in turn stages, +2° in early stages
 3. Farther spawn distances for lower resolution
-4. Lower replay for blind stages to track true SSR
+4. Lower replay for accurate SSR tracking
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -140,13 +139,18 @@ OFFSET_CONFIGS = {
     34: (180.0, 0.05, 0.50, 0.70),
 }
 
-# Replay probabilities per stage range
+# =============================================================================
+# REPLAY PROBABILITIES (v10.1 - REDUCED FOR STABILITY)
+# =============================================================================
+# Lower replay = more accurate SSR tracking = less oscillation
+# The policy learns current stage without contamination from easier stages
+
 REPLAY_PROBS = {
-    "early": 0.15,      # S1-S6
-    "micro": 0.18,      # S7-S12
-    "ultra": 0.22,      # S13-S22
-    "turn_visible": 0.25,   # S23-S25 (goal visible)
-    "turn_blind": 0.15,     # S26-S34 (goal out of FOV - lower to track true SSR)
+    "early": 0.12,          # S1-S6   (was 0.15)
+    "micro": 0.12,          # S7-S12  (was 0.18)
+    "ultra": 0.12,          # S13-S22 (was 0.22 - this was too high!)
+    "turn_visible": 0.15,   # S23-S25 (was 0.25)
+    "turn_blind": 0.10,     # S26-S34 (was 0.15)
 }
 
 # Stage category boundaries
