@@ -68,7 +68,7 @@ REWARD_CONFIG = {
     "success_distance": 0.03,
     "success_min_steps": 5,
     
-    # Time penalty (GENTLE - encourages exploration)
+    # Time penalty (ENABLED - prevents reward exploitation)
     "time_base": -0.01,
     "time_exp_factor": 2.0,
     "time_scale": 25.0,

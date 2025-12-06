@@ -388,7 +388,7 @@ class TekoEnv(DirectRLEnv):
     # Observations (WITH FP16 OPTIMIZATION)
     # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
-        """Capture RGB, convert to grayscale, return stacked frames with FP16."""
+        """Capture RGB + privileged state for asymmetric critic."""
         import torch.nn.functional as F
 
         num_envs = self.scene.cfg.num_envs
@@ -398,7 +398,7 @@ class TekoEnv(DirectRLEnv):
         if self.frame_stack is None:
             self.frame_stack = torch.zeros(
                 (num_envs, self.num_frame_stack, 1, h, w),
-                device=self.device, dtype=torch.float16,  # ← FP16 for VRAM
+                device=self.device, dtype=torch.float16,
             )
         if self.frame_counts is None:
             self.frame_counts = torch.zeros(
@@ -427,7 +427,7 @@ class TekoEnv(DirectRLEnv):
                 ).squeeze(0)
 
             gray = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-            gray = gray.unsqueeze(0).half()  # ← Convert to FP16
+            gray = gray.unsqueeze(0).half()
             gray_current[env_idx] = gray
 
         reset_mask = self.frame_counts == 0
@@ -442,10 +442,52 @@ class TekoEnv(DirectRLEnv):
             self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
             self.frame_stack[idx, -1] = gray_current[idx]
 
-        # Convert back to FP32 for policy (AMP will handle the rest)
+        # Convert back to FP32 for policy
         stacked = self.frame_stack.squeeze(2).float()
-        return {"rgb": stacked}
-
+        
+        # ============================================================
+        # ADD PRIVILEGED STATE IF ASYMMETRIC CRITIC ENABLED
+        # ============================================================
+        if getattr(self.cfg, 'asymmetric_critic', False):
+            robot_pos = self.robot.data.root_pos_w
+            goal_pos = self.goal_positions
+            robot_quat = self.robot.data.root_quat_w
+            robot_vel = self.robot.data.root_lin_vel_w
+            robot_angvel = self.robot.data.root_ang_vel_w
+            
+            # Compute relative state
+            diff = goal_pos - robot_pos
+            dx, dy, dz = diff[:, 0], diff[:, 1], diff[:, 2]
+            
+            # Yaw error
+            robot_yaw = self._extract_yaw(robot_quat)
+            vec_to_goal = goal_pos - robot_pos
+            goal_yaw = torch.atan2(vec_to_goal[:, 1], vec_to_goal[:, 0])
+            rear_yaw = robot_yaw + torch.pi
+            yaw_error = torch.atan2(
+                torch.sin(rear_yaw - goal_yaw),
+                torch.cos(rear_yaw - goal_yaw)
+            )
+            
+            # Stack privileged state: [dx, dy, dz, yaw_error, vx, vy, w]
+            privileged = torch.stack([
+                dx, dy, dz, yaw_error,
+                robot_vel[:, 0], robot_vel[:, 1], robot_angvel[:, 2]
+            ], dim=-1)
+            
+            return {
+                "rgb": stacked,
+                "privileged": privileged,
+            }
+        else:
+            return {"rgb": stacked}
+        
+    def _extract_yaw(self, quat: torch.Tensor) -> torch.Tensor:
+        """Extract yaw angle from quaternion [x, y, z, w]."""
+        qx, qy, qz, qw = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        return torch.atan2(siny_cosp, cosy_cosp)
     # ------------------------------------------------------------------
     # Rewards
     # ------------------------------------------------------------------
@@ -506,8 +548,8 @@ class TekoEnv(DirectRLEnv):
         terminated = success | out_of_bounds | collision
         time_out = self.episode_length_buf >= self.max_episode_length
 
-        if success.any():
-            print(f"[SUCCESS] {int(success.sum().item())} dockings!")
+        #if success.any():
+        #   print(f"[SUCCESS] {int(success.sum().item())} dockings!")
 
         return terminated, time_out
 

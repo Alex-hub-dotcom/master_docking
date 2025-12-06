@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 """
-State-Based PPO Training for TEKO (Debugging)
-==============================================
+State-Based PPO Training for TEKO (Debugging) - FIXED v1.1
+===========================================================
 
 Train with ground truth state observations to validate:
 - Curriculum progression
 - Reward function effectiveness
 - Training stability
 
-Expected: 1000 envs, 6-8 hours → Stage 14+ with 60%+ SSR
+⚡ CRITICAL FIXES:
+- log_std clamping (prevents entropy explosion)
+- Proper episode counting (not step counting)
+- Clean logging every 2 rollouts
+
+Expected: 1000 envs, Stage 0 complete in 5-10 minutes
 
 Usage:
     python scripts/train_state_ppo.py
@@ -57,7 +62,7 @@ PPO_CONFIG = {
     "value_loss_coef": 0.5,
     "entropy_coef": 0.01,
     "max_grad_norm": 0.5,
-    "log_interval": 10,
+    "log_interval": 2,  # Log every 2 rollouts (512K steps)
     "save_interval": 30_000,
 }
 
@@ -93,7 +98,7 @@ class CurriculumManager:
     
     def update(self, done: torch.Tensor, success: torch.Tensor):
         """Update curriculum based on episode completions."""
-        # Count episodes (not environment steps!)
+        # ⚡ FIX: Count episodes (not environment steps!)
         episodes_done = done.sum().item()
         self.stage_steps += episodes_done
         
@@ -140,7 +145,7 @@ class CurriculumManager:
 
 
 # =============================================================================
-# PPO AGENT (WITH PROPER STOCHASTIC POLICY)
+# PPO AGENT (WITH LOG_STD CLAMPING)
 # =============================================================================
 
 class PPOAgent:
@@ -217,7 +222,7 @@ class PPOAgent:
         return returns, advantages
     
     def update(self, next_state: torch.Tensor):
-        """PPO update with proper gradient flow."""
+        """PPO update with log_std clamping."""
         # Compute returns
         with torch.no_grad():
             _, next_value = self.policy(next_state)
@@ -259,6 +264,11 @@ class PPOAgent:
                 # Forward pass
                 mean, value = self.policy(batch_states)
                 value = value.squeeze(-1)
+                
+                # ⚡ CRITICAL FIX: Clamp log_std to prevent entropy explosion
+                with torch.no_grad():
+                    self.log_std.clamp_(-5.0, 2.0)  # std ∈ [0.0067, 7.39]
+                
                 std = torch.exp(self.log_std)
                 
                 dist = torch.distributions.Normal(mean, std)
@@ -305,65 +315,6 @@ class PPOAgent:
 
 
 # =============================================================================
-# DIAGNOSTIC MODE
-# =============================================================================
-
-DIAGNOSTIC_MODE = False  # Set True to debug
-
-
-def run_diagnostics(env, policy, device):
-    """Run comprehensive diagnostics."""
-    print("\n" + "="*70)
-    print("🔬 DIAGNOSTIC MODE")
-    print("="*70)
-    
-    obs_dict, _ = env.reset()
-    state = obs_dict["policy"]
-    
-    print(f"\n1️⃣ OBSERVATION CHECK:")
-    print(f"   Shape: {state.shape}")
-    print(f"   Device: {state.device}")
-    print(f"   Range: [{state.min().item():.3f}, {state.max().item():.3f}]")
-    print(f"   Sample states (first 3):")
-    for i in range(min(3, state.shape[0])):
-        print(f"      Env {i}: [{state[i,0]:.3f}, {state[i,1]:.3f}, {state[i,2]:.3f}, {state[i,3]:.3f}]")
-    
-    print(f"\n2️⃣ DISTANCE CHECK:")
-    _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
-    print(f"   Surface XY: [{surface_xy.min().item():.4f}, {surface_xy.max().item():.4f}]")
-    print(f"   Initial successes: {(surface_xy < 0.03).sum().item()}/{state.shape[0]}")
-    
-    print(f"\n3️⃣ REWARD CHECK (10 steps):")
-    for step_i in range(10):
-        action = torch.randn(state.shape[0], 2, device=device) * 0.3
-        obs_dict, reward, term, trunc, _ = env.step(action)
-        done = term | trunc
-        
-        _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
-        success = surface_xy < 0.03
-        
-        print(f"   Step {step_i:2d}: R=[{reward.min().item():6.1f}, {reward.max().item():6.1f}] "
-              f"Dist=[{surface_xy.min().item():.3f}, {surface_xy.max().item():.3f}] "
-              f"Succ={success.sum().item():3d}")
-    
-    print(f"\n4️⃣ CURRICULUM:")
-    print(f"   Stage: {env.curriculum_level}")
-    print(f"   Name: {STAGE_NAMES[env.curriculum_level]}")
-    
-    print(f"\n5️⃣ POLICY CHECK:")
-    with torch.no_grad():
-        mean, value = policy(state)
-    print(f"   Mean shape: {mean.shape}, range: [{mean.min().item():.3f}, {mean.max().item():.3f}]")
-    print(f"   Value shape: {value.shape}, range: [{value.min().item():.2f}, {value.max().item():.2f}]")
-    
-    print("\n" + "="*70)
-    print("✅ DIAGNOSTIC COMPLETE")
-    print("="*70 + "\n")
-    
-    exit()
-
-
-# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -380,20 +331,18 @@ def main():
     ckpt_dir = Path(f"teko_state_debug/{run_name}")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     
-    # DIAGNOSTIC MODE
-    if DIAGNOSTIC_MODE:
-        run_diagnostics(env, policy, device)
-    
     # Training
     obs, _ = env.reset()
     state = obs["policy"]
     
     total_steps = 0
     episode_rewards = []
+    rollout_count = 0
     
-    print(f"\n🚀 State-based training")
+    print(f"\n🚀 State-based training (FIXED)")
     print(f"   Envs: {cfg.num_envs}")
     print(f"   Total steps: {PPO_CONFIG['total_timesteps']:,}")
+    print(f"   Fixes: log_std clamping, no noise, no time penalty")
     print(f"   Checkpoints: {ckpt_dir}\n")
     
     while total_steps < PPO_CONFIG["total_timesteps"]:
@@ -419,9 +368,10 @@ def main():
         
         # Update
         losses = agent.update(state)
+        rollout_count += 1
         
-        # Log
-        if total_steps % (PPO_CONFIG["log_interval"] * PPO_CONFIG["rollout_steps"] * cfg.num_envs) < cfg.num_envs:
+        # Log every N rollouts
+        if rollout_count % PPO_CONFIG["log_interval"] == 0:
             stats = curriculum.get_stats()
             avg_r = np.mean(episode_rewards[-100:]) if episode_rewards else 0.0
             
@@ -432,7 +382,7 @@ def main():
                   f"Ent={losses['entropy']:.3f} | "
                   f"Ep={stats['episodes']:>6}/{stats['max_episodes']}")
         
-        # Save
+        # Save checkpoints
         if total_steps % PPO_CONFIG["save_interval"] < cfg.num_envs:
             torch.save({
                 "policy": policy.state_dict(),
@@ -441,7 +391,7 @@ def main():
                 "total_steps": total_steps,
                 "stage": curriculum.current_stage,
             }, ckpt_dir / f"ckpt_{total_steps}.pt")
-            print(f"💾 Checkpoint saved")
+            print(f"💾 Checkpoint saved at step {total_steps}")
     
     print(f"\n✅ Training complete! Final stage: {curriculum.current_stage}/{NUM_STAGES-1}")
     

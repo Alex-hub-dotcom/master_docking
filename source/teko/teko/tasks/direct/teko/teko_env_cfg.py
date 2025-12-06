@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment Configuration (Optimized for Low-VRAM)
--------------------------------------------------------
+TEKO Environment Configuration (84×84 + Asymmetric Critic)
+-----------------------------------------------------------
 Optimized for:
-- 64×64 grayscale observations (4-frame stack)
-- 65-100 parallel environments (VRAM-limited)
-- Mixed precision training support
+- 84×84 grayscale observations (4-frame stack)
+- Asymmetric actor-critic (vision + privileged state)
+- 65-100 parallel environments
 
 Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
 """
@@ -35,6 +35,11 @@ class TekoEnvCfg(DirectRLEnvCfg):
     debug_robot_boxes: bool = False
 
     # ------------------------------------------------------------------
+    # Asymmetric actor-critic flag
+    # ------------------------------------------------------------------
+    asymmetric_critic: bool = True  # ← NEW: Enable privileged observations
+
+    # ------------------------------------------------------------------
     # Arena limits
     # ------------------------------------------------------------------
     arena_half_x: float = 1.8
@@ -59,10 +64,10 @@ class TekoEnvCfg(DirectRLEnvCfg):
     )
 
     # ------------------------------------------------------------------
-    # Scene (Start with 65, test up to 100 with 64x64)
+    # Scene (84×84 allows more envs than 64×64)
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=65,  # Try increasing to 80-100 if VRAM allows
+        num_envs=100,  # 84×84 can handle 100+ envs
         env_spacing=6.0,
         replicate_physics=True,
     )
@@ -94,7 +99,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
     # ------------------------------------------------------------------
-    # Camera Configuration (64×64 for VRAM efficiency)
+    # Camera Configuration (84×84)
     # ------------------------------------------------------------------
     @configclass
     class CameraCfg:
@@ -105,8 +110,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
             "TEKO_WallBack/TEKO_Camera/RearCamera"
         )
 
-        width = 84   # Reduced from 84 for VRAM
-        height = 84  # ~44% less pixels than 84x84
+        width = 84
+        height = 84
 
         frequency_hz = 15
         focal_length = 3.6
@@ -140,5 +145,6 @@ class TekoEnvCfg(DirectRLEnvCfg):
     action_space = (2,)
 
     observation_space = {
-        "rgb": (4, 84, 84),  # 4 grayscale frames at 64x64
-    }
+        "rgb": (4, 84, 84),          # Vision (actor + critic)
+        "privileged": (7,),          # ← NEW: State (critic only)
+    }                                # [dx, dy, dz, yaw_err, vx, vy, w]
