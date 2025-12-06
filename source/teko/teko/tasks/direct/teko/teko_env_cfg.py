@@ -105,8 +105,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
             "TEKO_WallBack/TEKO_Camera/RearCamera"
         )
 
-        width = 64   # Reduced from 84 for VRAM
-        height = 64  # ~44% less pixels than 84x84
+        width = 84   # Reduced from 84 for VRAM
+        height = 84  # ~44% less pixels than 84x84
 
         frequency_hz = 15
         focal_length = 3.6
@@ -140,5 +140,5 @@ class TekoEnvCfg(DirectRLEnvCfg):
     action_space = (2,)
 
     observation_space = {
-        "rgb": (4, 64, 64),  # 4 grayscale frames at 64x64
+        "rgb": (4, 84, 84),  # 4 grayscale frames at 64x64
     }

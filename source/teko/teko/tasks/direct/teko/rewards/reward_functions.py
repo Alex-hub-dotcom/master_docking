@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward Functions for TEKO Docking (v9.2 – 64px OPTIMIZED)
-==========================================================
+Reward Functions for TEKO Docking (v9.3 – UNIFIED FINAL)
+========================================================
 
-Optimized for 64×64 grayscale vision-based docking.
+Unified reward function for both state-based and vision-based training.
+Optimized for 64×64 and 84×84 grayscale observations.
 
-Key 64px adjustments from v9.1:
-- Alignment scale: 0.20 (maintained - works well)
-- Progress scale: 8.0 (maintained)
-- Turning bonus: 0.35 (maintained)
-- Facing threshold: 20° (maintained)
-- Time penalty: SOFTENED for better exploration
+Key design principles:
+- Gentle time penalty (encourages exploration)
+- Strong progress/alignment shaping (guides learning)
+- Nuclear terminal penalties (prevents bad behaviors)
+- Curriculum-friendly (allows time to master stages)
 
 Reward structure:
 1. Distance reward     - Continuous penalty for being far
@@ -22,7 +22,7 @@ Reward structure:
 7. Collision penalty   - Terminal penalty for crashes
 8. Boundary penalty    - Terminal penalty for leaving arena
 9. Success bonus       - Terminal reward for docking
-10. Time penalty       - Gentle penalty for slow episodes (SOFTENED)
+10. Time penalty       - Gentle penalty for slow episodes
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -68,10 +68,10 @@ REWARD_CONFIG = {
     "success_distance": 0.03,
     "success_min_steps": 5,
     
-    # Time penalty (SOFTENED for better exploration)
-    "time_base": -0.01,         # was -0.02
-    "time_exp_factor": 2.0,     # was 4.0 - less exponential
-    "time_scale": 25.0,         # was 50.0 - less aggressive
+    # Time penalty (GENTLE - encourages exploration)
+    "time_base": -0.01,
+    "time_exp_factor": 2.0,
+    "time_scale": 25.0,
     
     # Clipping
     "reward_min": -500.0,
@@ -116,7 +116,7 @@ def _compute_distance_reward(surface_xy: torch.Tensor) -> torch.Tensor:
     return torch.clamp(reward, min=cfg["distance_min"], max=cfg["distance_max"])
 
 
-def _compute_progress_reward(env, surface_xy: torch.Tensor) -> torch.Tensor:
+def _compute_progress_reward(env, surface_xy: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Reward for making progress toward goal."""
     cfg = REWARD_CONFIG
     
@@ -258,7 +258,7 @@ def _compute_success_bonus(env, surface_xy: torch.Tensor) -> torch.Tensor:
 
 
 def _compute_time_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
-    """Gentle time penalty to encourage efficiency (SOFTENED)."""
+    """Gentle time penalty to encourage efficiency."""
     cfg = REWARD_CONFIG
     
     max_ep_len = float(env.max_episode_length)
@@ -266,7 +266,7 @@ def _compute_time_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
     length_ratio = ep_len.float() / max_ep_len
     
     exp_factor = torch.exp(cfg["time_exp_factor"] * length_ratio) - 1.0
-    exp_factor = exp_factor / (np.exp(cfg["time_exp_factor"]) - 1.0)  # Normalize
+    exp_factor = exp_factor / (np.exp(cfg["time_exp_factor"]) - 1.0)
     
     return cfg["time_base"] * (1.0 + cfg["time_scale"] * exp_factor)
 
@@ -279,14 +279,14 @@ def compute_total_reward(env) -> torch.Tensor:
     """
     Compute total reward for TEKO docking task.
     
+    Works for both state-based and vision-based training.
+    
     Returns:
         Total reward tensor [num_envs]
     """
     cfg = REWARD_CONFIG
     
-    # ------------------------------------------------------------------
     # Get state information
-    # ------------------------------------------------------------------
     _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
     
     robot_quat = env.robot.data.root_quat_w
@@ -299,9 +299,7 @@ def compute_total_reward(env) -> torch.Tensor:
     yaw_error = _compute_yaw_error(robot_yaw, robot_pos, goal_pos)
     yaw_error_abs = torch.abs(yaw_error)
     
-    # ------------------------------------------------------------------
     # Compute reward components
-    # ------------------------------------------------------------------
     distance_reward = _compute_distance_reward(surface_xy)
     progress_reward, progress = _compute_progress_reward(env, surface_xy)
     alignment_reward = _compute_alignment_reward(yaw_error_abs)
@@ -313,9 +311,7 @@ def compute_total_reward(env) -> torch.Tensor:
     success_bonus = _compute_success_bonus(env, surface_xy)
     time_penalty = _compute_time_penalty(env, surface_xy)
     
-    # ------------------------------------------------------------------
     # Sum all components
-    # ------------------------------------------------------------------
     total_reward = (
         distance_reward
         + progress_reward
@@ -331,9 +327,7 @@ def compute_total_reward(env) -> torch.Tensor:
     
     total_reward = torch.clamp(total_reward, min=cfg["reward_min"], max=cfg["reward_max"])
     
-    # ------------------------------------------------------------------
     # Logging
-    # ------------------------------------------------------------------
     _log_rewards(env, {
         "distance": distance_reward,
         "progress": progress_reward,
@@ -352,6 +346,9 @@ def compute_total_reward(env) -> torch.Tensor:
 
 def _log_rewards(env, rewards: dict) -> None:
     """Log reward components for TensorBoard."""
+    if not hasattr(env, 'reward_components'):
+        env.reward_components = {}
+    
     rc = env.reward_components
     for name, val in rewards.items():
         if name not in rc:

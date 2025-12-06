@@ -252,8 +252,8 @@ class Policy(nn.Module):
             feature_dim=256,
             pretrained=False,
             num_frame_stack=4,
-            input_h=64,
-            input_w=64,
+            input_h=84,
+            input_w=84,
         )
 
         self.actor = nn.Sequential(
