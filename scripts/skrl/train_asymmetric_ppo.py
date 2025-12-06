@@ -12,6 +12,14 @@ Asymmetric Actor-Critic PPO Training for TEKO Vision-Based Docking
 Author: Alexandre Schleier Neves da Silva
 Date: December 2024
 """
+# Isaac Lab launcher (MUST come first!)
+from isaaclab.app import AppLauncher
+# AFTER (correct):
+app_launcher = AppLauncher({
+    "headless": True,
+    "enable_cameras": True
+})
+simulation_app = app_launcher.app
 
 import os
 import sys
@@ -85,10 +93,13 @@ class AsymmetricPPOTrainer:
         dones = []
         values = []
         
+        # Get initial observation
+        if not hasattr(self, '_obs_cache'):
+            self._obs_cache, _ = self.env.reset()
+        
         # Collect rollout
         for step in range(self.rollout_steps):
-            # Get current observation
-            obs = self.env.obs_buf
+            obs = self._obs_cache
             
             # Forward pass (no gradients during rollout)
             with torch.no_grad():
@@ -103,19 +114,23 @@ class AsymmetricPPOTrainer:
             values.append(value.squeeze(-1).clone())
             
             # Step environment
-            self.env.step(action)
+            next_obs, reward, terminated, truncated, _ = self.env.step(action)
+            done = terminated | truncated
             
             # Store rewards and dones
-            rewards.append(self.env.reward_buf.clone())
-            dones.append(self.env.reset_buf.clone())
+            rewards.append(reward.clone())
+            dones.append(done.clone())
+            
+            # Cache next observation
+            self._obs_cache = next_obs
             
             # Update stats
             self.total_steps += num_envs
-            self.total_episodes += self.env.reset_buf.sum().item()
+            self.total_episodes += done.sum().item()
         
         # Get final value for GAE
         with torch.no_grad():
-            _, _, final_value = self.policy(self.env.obs_buf)
+            _, _, final_value = self.policy(self._obs_cache)
             final_value = final_value.squeeze(-1)
         
         # Stack tensors
@@ -150,7 +165,7 @@ class AsymmetricPPOTrainer:
             "advantages": advantages,
             "returns": returns,
         }
-    
+        
     def update_policy(self, rollout_data):
         """Update policy with PPO."""
         # Flatten batch dimensions
@@ -268,10 +283,10 @@ class AsymmetricPPOTrainer:
     def _log_progress(self, rollout_idx, rollout_data, update_stats):
         """Log training progress."""
         # Compute episode stats
-        rewards = rollout_data["advantages"] + rollout_data["returns"] - rollout_data["returns"]  # Hack to get rewards
-        mean_reward = rewards.mean().item()
-        max_reward = rewards.max().item()
-        min_reward = rewards.min().item()
+        returns = rollout_data["returns"]
+        mean_return = returns.mean().item()
+        max_return = returns.max().item()
+        min_return = returns.min().item()
         
         # Get curriculum info
         stage = self.env.curriculum_level
@@ -283,7 +298,7 @@ class AsymmetricPPOTrainer:
         print(f"Total steps: {self.total_steps:,} | Total episodes: {self.total_episodes:,}")
         print(f"Policy loss: {update_stats['policy_loss']:.4f} | Value loss: {update_stats['value_loss']:.4f}")
         print(f"Entropy: {update_stats['entropy']:.4f} | Approx KL: {update_stats['approx_kl']:.4f}")
-        print(f"Reward: {mean_reward:.2f} (min: {min_reward:.2f}, max: {max_reward:.2f})")
+        print(f"Return: {mean_return:.2f} (min: {min_return:.2f}, max: {max_return:.2f})")
         print(f"{'='*80}\n")
     
     def _save_checkpoint(self, rollout_idx):
@@ -308,7 +323,7 @@ def main():
     
     # Environment config
     env_cfg = TekoEnvCfg()
-    env_cfg.scene.num_envs = 100
+    env_cfg.scene.num_envs = 50
     env_cfg.asymmetric_critic = True  # Enable asymmetric observations
     env_cfg.camera.width = 84
     env_cfg.camera.height = 84

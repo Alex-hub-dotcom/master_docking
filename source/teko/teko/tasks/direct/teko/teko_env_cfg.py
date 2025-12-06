@@ -29,7 +29,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------
     decimation = 2
     episode_length_s = 15.0
-    enable_curriculum = False
+    enable_curriculum = True
 
     debug_boundaries: bool = False
     debug_robot_boxes: bool = False
@@ -67,7 +67,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # Scene (84×84 allows more envs than 64×64)
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=100,  # 84×84 can handle 100+ envs
+        num_envs=50,  # 84×84 can handle 100+ envs
         env_spacing=6.0,
         replicate_physics=True,
     )
