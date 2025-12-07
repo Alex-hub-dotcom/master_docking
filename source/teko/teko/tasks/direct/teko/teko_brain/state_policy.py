@@ -26,7 +26,7 @@ class StateMLP(nn.Module):
     - Output: 2D actions [v, ω]
     """
     
-    def __init__(self, state_dim: int = 4, action_dim: int = 2, hidden_dim: int = 128):
+    def __init__(self, state_dim: int = 4, action_dim: int = 2, hidden_dim: int = 256):
         super().__init__()
         
         # Actor (policy)

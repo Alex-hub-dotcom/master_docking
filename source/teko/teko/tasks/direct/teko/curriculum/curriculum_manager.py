@@ -33,29 +33,22 @@ from ..utils.geometry_utils import yaw_to_quat
 # =============================================================================
 
 STAGE_NAMES = [
-    # Forward stages (S0-S2): Learn basic approach
     "Stage 0:  Baby Steps (5–15 cm, forward)",
     "Stage 1:  Forward (15–30 cm, forward)",
     "Stage 2:  Long Forward (25–40 cm, forward)",
-    
-    # Offset stages (S3-S7): Introduce corrections
     "Stage 3:  Small Offset (±5°, ±2 cm)",
     "Stage 4:  Offset (±10°, ±3 cm)",
     "Stage 5:  Offset (±15°, ±4 cm)",
-    "Stage 6:  Medium Offset (±20°, ±6 cm)",
-    "Stage 7:  Large Offset (±30°, ±8 cm)",
-    
-    # Turn stages (S8-S10): Goal still visible
-    "Stage 8:  Large Turn (±45°, ±8 cm)",
-    "Stage 9:  Big Turn (±60°, ±6 cm)",
-    "Stage 10: Right Angle (±90°, ±5 cm)",
-    
-    # Blind search stages (S11-S16): Goal out of FOV
-    "Stage 11: Blind (±105°, ±5 cm)",
-    "Stage 12: Blind (±120°, ±5 cm)",
-    "Stage 13: Blind (±135°, ±5 cm)",
-    "Stage 14: Blind (±150°, ±5 cm)",
-    "Stage 15: Blind (±165°, ±5 cm)",
+    "Stage 6:  Offset (±18°, ±5 cm)",      # updated
+    "Stage 7:  Offset (±22°, ±6 cm)",      # updated
+    "Stage 8:  Offset (±28°, ±7 cm)",      # updated
+    "Stage 9:  Offset (±35°, ±8 cm)",      # updated
+    "Stage 10: Turn (±45°, ±8 cm)",        # updated
+    "Stage 11: Turn (±60°, ±6 cm)",        # updated
+    "Stage 12: Turn (±75°, ±5 cm)",        # updated
+    "Stage 13: Turn (±90°, ±5 cm)",        # updated
+    "Stage 14: Blind (±120°, ±5 cm)",
+    "Stage 15: Blind (±150°, ±5 cm)",
     "Stage 16: Full Circle (±180°, ±5 cm)",
 ]
 
@@ -67,6 +60,7 @@ NUM_STAGES = len(STAGE_NAMES)
 # =============================================================================
 
 # Forward stages: (min_dist, max_dist)
+# Forward stages: (min_dist, max_dist)
 FORWARD_CONFIGS = {
     0: (0.05, 0.15),
     1: (0.15, 0.30),
@@ -75,27 +69,21 @@ FORWARD_CONFIGS = {
 
 # Offset stages: (angle_deg, lateral_m, min_dist, max_dist)
 OFFSET_CONFIGS = {
-    # First offsets
     3:  (5.0,  0.02, 0.25, 0.36),
     4:  (10.0, 0.03, 0.25, 0.38),
     5:  (15.0, 0.04, 0.25, 0.40),
-    6:  (20.0, 0.06, 0.25, 0.40),
-    7:  (30.0, 0.08, 0.25, 0.42),
-    
-    # Large angle stages (goal still visible/edge of FOV)
-    8:  (45.0,  0.08, 0.28, 0.45),
-    9:  (60.0,  0.06, 0.30, 0.48),
-    10: (90.0,  0.05, 0.32, 0.50),
-    
-    # Blind search stages (goal out of FOV, +15° per stage)
-    11: (105.0, 0.05, 0.34, 0.52),
-    12: (120.0, 0.05, 0.36, 0.54),
-    13: (135.0, 0.05, 0.38, 0.56),
-    14: (150.0, 0.05, 0.40, 0.58),
-    15: (165.0, 0.05, 0.42, 0.60),
+    6:  (15.0, 0.06, 0.25, 0.40),   # was 20°
+    7:  (22.0, 0.06, 0.25, 0.42),   # was 30°
+    8:  (28.0, 0.07, 0.25, 0.42),   # new
+    9:  (35.0, 0.08, 0.28, 0.45),   # was 45°
+    10: (45.0, 0.08, 0.28, 0.45),   # was 60°
+    11: (60.0, 0.06, 0.30, 0.48),   # was 90°
+    12: (75.0, 0.05, 0.30, 0.50),   # new
+    13: (90.0, 0.05, 0.32, 0.50),   # was 105°
+    14: (120.0, 0.05, 0.36, 0.54),
+    15: (150.0, 0.05, 0.40, 0.58),
     16: (180.0, 0.05, 0.45, 0.65),
 }
-
 # =============================================================================
 # REPLAY PROBABILITIES (MINIMAL FOR ACCURATE SSR)
 # =============================================================================

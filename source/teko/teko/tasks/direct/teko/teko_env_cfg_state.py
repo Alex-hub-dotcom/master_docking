@@ -26,7 +26,7 @@ from isaaclab.utils import configclass
 ##
 # Pre-defined configs
 ##
-from teko.teko.tasks.direct.teko.robots.teko import TEKO_CONFIGURATION
+from teko.tasks.direct.teko.robots.teko import TEKO_CONFIGURATION
 
 
 @configclass

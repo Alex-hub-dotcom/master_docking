@@ -54,8 +54,8 @@ REWARD_CONFIG = {
     
     "approach_scale": 2.0,
     
-    "turning_bonus": 0.35,
-    "turning_threshold_deg": 20.0,
+    "turning_bonus": 0.7,
+    "turning_threshold_deg": 10.0,
     
     # Terminal rewards
     "collision_penalty": -100.0,

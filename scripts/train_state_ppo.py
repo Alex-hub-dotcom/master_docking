@@ -1,317 +1,397 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 """
-State-Based PPO Training for TEKO (Debugging) - FIXED v1.1
-===========================================================
+State-Based PPO Training for TEKO Docking (Debugging)
+======================================================
+Uses ground truth state [dx, dy, dz, yaw_error] instead of vision.
+Same reward function and curriculum as vision-based training.
 
-Train with ground truth state observations to validate:
-- Curriculum progression
-- Reward function effectiveness
-- Training stability
+Purpose: Validate that curriculum + rewards work before vision debugging.
 
-⚡ CRITICAL FIXES:
-- log_std clamping (prevents entropy explosion)
-- Proper episode counting (not step counting)
-- Clean logging every 2 rollouts
-
-Expected: 1000 envs, Stage 0 complete in 5-10 minutes
-
-Usage:
-    python scripts/train_state_ppo.py
+If this works → reward/curriculum are fine, vision is the problem
+If this fails → fix reward/curriculum first
 
 Author: Alexandre Schleier Neves da Silva
+Date: December 2024
 """
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from datetime import datetime
-from pathlib import Path
-
-# Isaac Lab imports
 from isaaclab.app import AppLauncher
-app_launcher = AppLauncher({"headless": True})
+
+app_launcher = AppLauncher({
+    "headless": True,
+    "enable_cameras": False,  # No cameras needed!
+})
 simulation_app = app_launcher.app
 
-
-# TEKO imports
 import sys
-sys.path.insert(0, "/workspace/teko/source")
+import torch
+import numpy as np
+from pathlib import Path
+from collections import deque
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
-from teko.teko.tasks.direct.teko.teko_env_cfg_state import TekoEnvCfgState
-from teko.teko.tasks.direct.teko.teko_env_state import TekoEnvState
-from teko.teko.tasks.direct.teko.teko_brain.state_policy import StateMLP
-from teko.teko.tasks.direct.teko.curriculum.curriculum_manager import (
-    NUM_STAGES, STAGE_NAMES, set_curriculum_level
-)
+sys.path.insert(0, "/workspace/teko/source/teko")
 
-
-# =============================================================================
-# PPO HYPERPARAMETERS
-# =============================================================================
-PPO_CONFIG = {
-    "total_timesteps": 150_000_000,
-    "rollout_steps": 256,
-    "batch_size": 2048,
-    "epochs": 6,
-    "learning_rate": 3e-4,
-    "gamma": 0.99,
-    "gae_lambda": 0.95,
-    "clip_epsilon": 0.2,
-    "value_loss_coef": 0.5,
-    "entropy_coef": 0.01,
-    "max_grad_norm": 0.5,
-    "log_interval": 2,  # Log every 2 rollouts (512K steps)
-    "save_interval": 30_000,
-}
+from teko.tasks.direct.teko.teko_env_state import TekoEnvState
+from teko.tasks.direct.teko.teko_env_cfg_state import TekoEnvCfgState
+from teko.tasks.direct.teko.curriculum.curriculum_manager import NUM_STAGES
 
 
 # =============================================================================
-# CURRICULUM MANAGER
+# STATE-BASED MLP POLICY
 # =============================================================================
 
-class CurriculumManager:
-    """Manages curriculum progression based on success rate."""
+class StatePolicy(torch.nn.Module):
+    """Simple MLP for state-based control."""
     
-    def __init__(self, env):
-        self.env = env
-        self.current_stage = 0
-        self.stage_steps = 0
-        self.stage_successes = []
-        self.success_window = 50
+    def __init__(self, state_dim=4, action_dim=2, hidden_dim=256, init_log_std=-0.5):
+        super().__init__()
         
-        # Stage thresholds (same as vision-based)
-        self.thresholds = {
-            0: 0.75, 1: 0.70, 2: 0.70,           # Forward
-            3: 0.65, 4: 0.65, 5: 0.65, 6: 0.65,  # Small offsets
-            7: 0.60, 8: 0.60, 9: 0.60, 10: 0.55, # Medium offsets + turns
-            11: 0.45, 12: 0.45, 13: 0.45,        # Blind stages
-            14: 0.45, 15: 0.45, 16: 0.45,
-        }
+        # Shared feature extractor
+        self.features = torch.nn.Sequential(
+            torch.nn.Linear(state_dim, hidden_dim),
+            torch.nn.LayerNorm(hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.LayerNorm(hidden_dim),
+            torch.nn.ReLU(),
+        )
         
-        self.min_steps = 50_000
-        self.max_steps = {
-            i: 800_000 if i < 8 else 1_200_000 if i < 11 else 2_000_000
-            for i in range(NUM_STAGES)
-        }
-    
-    def update(self, done: torch.Tensor, success: torch.Tensor):
-        """Update curriculum based on episode completions."""
-        # ⚡ FIX: Count episodes (not environment steps!)
-        episodes_done = done.sum().item()
-        self.stage_steps += episodes_done
+        # Actor head
+        self.actor = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, action_dim),
+            torch.nn.Tanh(),
+        )
         
-        # Track successes for completed episodes
-        for is_done, is_success in zip(done.cpu(), success.cpu()):
-            if is_done:
-                self.stage_successes.append(int(is_success))
-                if len(self.stage_successes) > self.success_window:
-                    self.stage_successes.pop(0)
-        
-        # Check advancement
-        if len(self.stage_successes) >= self.success_window:
-            ssr = np.mean(self.stage_successes)
-            threshold = self.thresholds[self.current_stage]
-            max_steps = self.max_steps[self.current_stage]
-            
-            can_advance = (
-                (ssr >= threshold and self.stage_steps >= self.min_steps) or
-                (self.stage_steps >= max_steps)
-            )
-            
-            if can_advance and self.current_stage < NUM_STAGES - 1:
-                reason = "SSR met" if ssr >= threshold else "Safety valve"
-                print(f"\n{'='*70}")
-                print(f"✅ {STAGE_NAMES[self.current_stage]} COMPLETE ({reason})")
-                print(f"   SSR: {ssr:.1%} (threshold: {threshold:.1%})")
-                print(f"   Episodes: {self.stage_steps:,}")
-                print(f"{'='*70}\n")
-                
-                self.current_stage += 1
-                self.stage_steps = 0
-                self.stage_successes = []
-                set_curriculum_level(self.env, self.current_stage)
-    
-    def get_stats(self) -> dict:
-        ssr = np.mean(self.stage_successes) if self.stage_successes else 0.0
-        return {
-            "stage": self.current_stage,
-            "ssr": ssr,
-            "episodes": self.stage_steps,
-            "threshold": self.thresholds[self.current_stage],
-            "max_episodes": self.max_steps[self.current_stage],
-        }
-
-
-# =============================================================================
-# PPO AGENT (WITH LOG_STD CLAMPING)
-# =============================================================================
-
-class PPOAgent:
-    """PPO with Gaussian policy for continuous control."""
-    
-    def __init__(self, policy: StateMLP, cfg: dict, device: str):
-        self.policy = policy
-        self.cfg = cfg
-        self.device = device
-        
-        self.optimizer = torch.optim.Adam(policy.parameters(), lr=cfg["learning_rate"])
+        # Critic head
+        self.critic = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 1),
+        )
         
         # Learnable log_std
-        self.log_std = nn.Parameter(torch.zeros(2, device=device))  # [v, w]
-        self.optimizer.add_param_group({"params": [self.log_std]})
+        self.log_std = torch.nn.Parameter(torch.full((action_dim,), init_log_std))
+        self.LOG_STD_MIN = -2.0
+        self.LOG_STD_MAX = 0.5
         
-        self.rollout_buffer = {
-            "states": [],
-            "actions": [],
-            "rewards": [],
-            "values": [],
-            "log_probs": [],
-            "dones": [],
-        }
+        self._init_weights()
     
-    def act(self, state: torch.Tensor):
-        """Sample action from policy."""
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, torch.nn.Linear):
+                torch.nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+        # Small init for actor output
+        torch.nn.init.orthogonal_(self.actor[-2].weight, gain=0.01)
+    
+    def _get_std(self):
+        log_std = torch.clamp(self.log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
+        return torch.exp(log_std)
+    
+    def forward(self, state):
+        features = self.features(state)
+        mean = self.actor(features)
+        value = self.critic(features)
+        std = self._get_std().unsqueeze(0).expand(mean.shape[0], -1)
+        return mean, std, value
+    
+    def sample_action(self, state, deterministic=False):
+        mean, std, _ = self.forward(state)
+        if deterministic:
+            return mean, torch.zeros(mean.shape[0], device=mean.device)
+        dist = torch.distributions.Normal(mean, std)
+        action = dist.sample()
+        log_prob = dist.log_prob(action).sum(-1)
+        return action, log_prob
+
+
+# =============================================================================
+# PPO TRAINER
+# =============================================================================
+
+class StatePPOTrainer:
+    """PPO trainer for state-based debugging."""
+    
+    def __init__(
+        self,
+        env,
+        policy,
+        lr=3e-4,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_epsilon=0.2,
+        entropy_coef=0.01,
+        value_coef=0.5,
+        max_grad_norm=0.5,
+        rollout_steps=128,
+        batch_size=2048,
+        epochs=6,
+        device="cuda",
+        ssr_threshold=0.70,
+        min_episodes=500,
+    ):
+        self.env = env
+        self.policy = policy
+        self.device = device
+        
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+        self.clip_epsilon = clip_epsilon
+        self.entropy_coef = entropy_coef
+        self.value_coef = value_coef
+        self.max_grad_norm = max_grad_norm
+        self.rollout_steps = rollout_steps
+        self.batch_size = batch_size
+        self.epochs = epochs
+        
+        self.ssr_threshold = ssr_threshold
+        self.min_episodes = min_episodes
+        
+        self.optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+        
+        # Stats
+        self.total_steps = 0
+        self.total_episodes = 0
+        self.stage_successes = 0
+        self.stage_episodes = 0
+        self.stage_steps = 0
+        self.ssr_window = deque(maxlen=1000)
+        
+        self.success_threshold = 350.0
+        
+        # TensorBoard
+        self.writer = SummaryWriter(f"runs/state_ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    
+    def collect_rollout(self):
+        num_envs = self.env.num_envs
+        
+        states, actions, log_probs, rewards, dones, values = [], [], [], [], [], []
+        rollout_successes = 0
+        rollout_episodes = 0
+        
+        if not hasattr(self, '_obs'):
+            self._obs, _ = self.env.reset()
+        
+        for _ in range(self.rollout_steps):
+            state = self._obs["policy"]
+            
+            with torch.no_grad():
+                action, log_prob = self.policy.sample_action(state)
+                _, _, value = self.policy(state)
+            
+            states.append(state.clone())
+            actions.append(action.clone())
+            log_probs.append(log_prob.clone())
+            values.append(value.squeeze(-1).clone())
+            
+            self._obs, reward, terminated, truncated, _ = self.env.step(action)
+            done = terminated | truncated
+            
+            rewards.append(reward.clone())
+            dones.append(done.clone())
+            
+            # Track successes
+            if done.any():
+                done_idx = done.nonzero(as_tuple=False).squeeze(-1)
+                done_rewards = reward[done_idx]
+                successes = (done_rewards > self.success_threshold).sum().item()
+                num_done = done_idx.shape[0]
+                
+                rollout_successes += successes
+                rollout_episodes += num_done
+                
+                for i in range(num_done):
+                    self.ssr_window.append(1 if done_rewards[i].item() > self.success_threshold else 0)
+            
+            self.total_steps += num_envs
+            self.stage_steps += num_envs
+        
+        self.stage_successes += rollout_successes
+        self.stage_episodes += rollout_episodes
+        self.total_episodes += rollout_episodes
+        
+        # Final value
         with torch.no_grad():
-            mean, value = self.policy(state)
-            std = torch.exp(self.log_std)
-            
-            dist = torch.distributions.Normal(mean, std)
-            action = dist.sample()
-            log_prob = dist.log_prob(action).sum(dim=-1)
-            
-            # Clamp actions
-            action = torch.clamp(action, -1.0, 1.0)
-            
-        return action, value.squeeze(-1), log_prob
-    
-    def store_transition(self, state, action, reward, value, log_prob, done):
-        """Store transition."""
-        self.rollout_buffer["states"].append(state)
-        self.rollout_buffer["actions"].append(action)
-        self.rollout_buffer["rewards"].append(reward)
-        self.rollout_buffer["values"].append(value)
-        self.rollout_buffer["log_probs"].append(log_prob)
-        self.rollout_buffer["dones"].append(done)
-    
-    def compute_returns(self, next_value: torch.Tensor):
-        """Compute GAE returns."""
-        rewards = torch.stack(self.rollout_buffer["rewards"])
-        values = torch.stack(self.rollout_buffer["values"])
-        dones = torch.stack(self.rollout_buffer["dones"])
+            _, _, final_value = self.policy(self._obs["policy"])
+            final_value = final_value.squeeze(-1)
         
-        T, N = rewards.shape
-        returns = torch.zeros_like(rewards)
+        # Stack
+        states = torch.stack(states)
+        actions = torch.stack(actions)
+        log_probs = torch.stack(log_probs)
+        rewards = torch.stack(rewards)
+        dones = torch.stack(dones)
+        values = torch.stack(values)
+        
+        # GAE
         advantages = torch.zeros_like(rewards)
+        gae = torch.zeros(num_envs, device=self.device)
+        next_value = final_value
         
-        gae = 0
-        for t in reversed(range(T)):
-            if t == T - 1:
-                next_non_terminal = 1.0 - dones[t].float()
-                next_val = next_value
-            else:
-                next_non_terminal = 1.0 - dones[t].float()
-                next_val = values[t + 1]
-            
-            delta = rewards[t] + self.cfg["gamma"] * next_val * next_non_terminal - values[t]
-            gae = delta + self.cfg["gamma"] * self.cfg["gae_lambda"] * next_non_terminal * gae
+        for t in reversed(range(self.rollout_steps)):
+            mask = 1.0 - dones[t].float()
+            delta = rewards[t] + self.gamma * next_value * mask - values[t]
+            gae = delta + self.gamma * self.gae_lambda * mask * gae
             advantages[t] = gae
+            next_value = values[t]
         
         returns = advantages + values
-        return returns, advantages
-    
-    def update(self, next_state: torch.Tensor):
-        """PPO update with log_std clamping."""
-        # Compute returns
-        with torch.no_grad():
-            _, next_value = self.policy(next_state)
-            next_value = next_value.squeeze(-1)
-        
-        returns, advantages = self.compute_returns(next_value)
-        
-        # Flatten
-        states = torch.stack(self.rollout_buffer["states"]).view(-1, 4)
-        actions = torch.stack(self.rollout_buffer["actions"]).view(-1, 2)
-        old_log_probs = torch.stack(self.rollout_buffer["log_probs"]).view(-1)
-        returns = returns.view(-1)
-        advantages = advantages.view(-1)
-        
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # Mini-batch updates
-        batch_size = self.cfg["batch_size"]
-        total_samples = len(states)
-        
-        policy_losses = []
-        value_losses = []
-        entropies = []
-        
-        for _ in range(self.cfg["epochs"]):
-            indices = torch.randperm(total_samples, device=self.device)
-            
-            for start in range(0, total_samples, batch_size):
-                end = min(start + batch_size, total_samples)
-                batch_idx = indices[start:end]
-                
-                batch_states = states[batch_idx]
-                batch_actions = actions[batch_idx]
-                batch_old_log_probs = old_log_probs[batch_idx]
-                batch_advantages = advantages[batch_idx]
-                batch_returns = returns[batch_idx]
-                
-                # Forward pass
-                mean, value = self.policy(batch_states)
-                value = value.squeeze(-1)
-                
-                # ⚡ CRITICAL FIX: Clamp log_std to prevent entropy explosion
-                with torch.no_grad():
-                    self.log_std.clamp_(-5.0, 2.0)  # std ∈ [0.0067, 7.39]
-                
-                std = torch.exp(self.log_std)
-                
-                dist = torch.distributions.Normal(mean, std)
-                log_prob = dist.log_prob(batch_actions).sum(dim=-1)
-                entropy = dist.entropy().sum(dim=-1).mean()
-                
-                # Policy loss
-                ratio = torch.exp(log_prob - batch_old_log_probs)
-                surr1 = ratio * batch_advantages
-                surr2 = torch.clamp(ratio, 1 - self.cfg["clip_epsilon"], 1 + self.cfg["clip_epsilon"]) * batch_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
-                
-                # Value loss
-                value_loss = F.mse_loss(value, batch_returns)
-                
-                # Total loss
-                loss = (
-                    policy_loss +
-                    self.cfg["value_loss_coef"] * value_loss -
-                    self.cfg["entropy_coef"] * entropy
-                )
-                
-                # Backward
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(
-                    list(self.policy.parameters()) + [self.log_std],
-                    self.cfg["max_grad_norm"]
-                )
-                self.optimizer.step()
-                
-                policy_losses.append(policy_loss.item())
-                value_losses.append(value_loss.item())
-                entropies.append(entropy.item())
-        
-        # Clear buffer
-        self.rollout_buffer = {k: [] for k in self.rollout_buffer}
         
         return {
-            "policy_loss": np.mean(policy_losses),
-            "value_loss": np.mean(value_losses),
-            "entropy": np.mean(entropies),
+            "states": states,
+            "actions": actions,
+            "log_probs": log_probs,
+            "advantages": advantages,
+            "returns": returns,
+            "rewards": rewards,
         }
+    
+    def update_policy(self, data):
+        T, N = data["states"].shape[:2]
+        total = T * N
+        
+        states = data["states"].view(total, -1)
+        actions = data["actions"].view(total, -1)
+        old_log_probs = data["log_probs"].view(total)
+        advantages = data["advantages"].view(total)
+        returns = data["returns"].view(total)
+        
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        stats = {"policy_loss": 0, "value_loss": 0, "entropy": 0, "kl": 0}
+        n_updates = 0
+        
+        for _ in range(self.epochs):
+            idx = torch.randperm(total, device=self.device)
+            
+            for start in range(0, total, self.batch_size):
+                end = min(start + self.batch_size, total)
+                b_idx = idx[start:end]
+                
+                mean, std, values = self.policy(states[b_idx])
+                dist = torch.distributions.Normal(mean, std)
+                log_prob = dist.log_prob(actions[b_idx]).sum(-1)
+                entropy = dist.entropy().sum(-1).mean()
+                
+                ratio = torch.exp(log_prob - old_log_probs[b_idx])
+                surr1 = ratio * advantages[b_idx]
+                surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages[b_idx]
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                value_loss = 0.5 * ((values.squeeze(-1) - returns[b_idx]) ** 2).mean()
+                
+                loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+                
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+                
+                stats["policy_loss"] += policy_loss.item()
+                stats["value_loss"] += value_loss.item()
+                stats["entropy"] += entropy.item()
+                stats["kl"] += ((ratio - 1) - torch.log(ratio)).mean().item()
+                n_updates += 1
+        
+        return {k: v / n_updates for k, v in stats.items()}
+    
+    def check_advancement(self):
+        if self.stage_episodes < self.min_episodes:
+            return False
+        
+        ssr = self.stage_successes / self.stage_episodes if self.stage_episodes > 0 else 0
+        
+        if ssr >= self.ssr_threshold:
+            current = self.env.curriculum_level
+            next_stage = min(current + 1, NUM_STAGES - 1)
+            
+            if next_stage > current:
+                print(f"\n{'='*70}")
+                print(f"🎉 ADVANCEMENT: Stage {current} → {next_stage}")
+                print(f"   SSR: {ssr:.1%} | Episodes: {self.stage_episodes}")
+                print(f"{'='*70}\n")
+                
+                self.env.set_curriculum_level(next_stage)
+                self.stage_successes = 0
+                self.stage_episodes = 0
+                self.stage_steps = 0
+                self.ssr_window.clear()
+                return True
+        return False
+    
+    def train(self, total_rollouts, log_interval=5, save_interval=100):
+        print(f"\n{'='*70}")
+        print("STATE-BASED PPO TRAINING (Debugging)")
+        print(f"{'='*70}")
+        print(f"Envs: {self.env.num_envs} | Rollout: {self.rollout_steps}")
+        print(f"SSR threshold: {self.ssr_threshold:.0%} | Min episodes: {self.min_episodes}")
+        print(f"{'='*70}\n")
+        
+        for rollout in range(total_rollouts):
+            data = self.collect_rollout()
+            stats = self.update_policy(data)
+            self.check_advancement()
+            
+            if (rollout + 1) % log_interval == 0:
+                self._log(rollout + 1, data, stats)
+            
+            if (rollout + 1) % save_interval == 0:
+                self._save(rollout + 1)
+    
+    def _log(self, rollout, data, stats):
+        stage = self.env.curriculum_level
+        ssr = self.stage_successes / self.stage_episodes if self.stage_episodes > 0 else 0
+        rolling = sum(self.ssr_window) / len(self.ssr_window) if self.ssr_window else 0
+        
+        log_std = self.policy.log_std.data.cpu().numpy()
+        std = np.exp(np.clip(log_std, -2, 0.5))
+        
+        mean_ret = data["returns"].mean().item()
+        mean_rew = data["rewards"].mean().item()
+        
+        print(f"\n{'='*70}")
+        print(f"Rollout {rollout} | Stage S{stage} | Steps: {self.stage_steps:,}")
+        print(f"{'-'*70}")
+        print(f"Total: {self.total_steps:,} steps | {self.total_episodes:,} episodes")
+        print(f"Stage: {self.stage_episodes} eps | {self.stage_successes} success | SSR: {ssr:.1%}")
+        print(f"Rolling SSR: {rolling:.1%} | Threshold: {self.ssr_threshold:.0%}")
+        print(f"{'-'*70}")
+        print(f"Policy: {stats['policy_loss']:.4f} | Value: {stats['value_loss']:.4f}")
+        print(f"Entropy: {stats['entropy']:.4f} | KL: {stats['kl']:.4f}")
+        print(f"Log_std: [{log_std[0]:.3f}, {log_std[1]:.3f}] | Std: [{std[0]:.3f}, {std[1]:.3f}]")
+        print(f"Mean reward: {mean_rew:.2f} | Return: {mean_ret:.2f}")
+        print(f"{'='*70}\n")
+        
+        # TensorBoard
+        self.writer.add_scalar("curriculum/stage", stage, self.total_steps)
+        self.writer.add_scalar("curriculum/stage_ssr", ssr, self.total_steps)
+        self.writer.add_scalar("curriculum/rolling_ssr", rolling, self.total_steps)
+        self.writer.add_scalar("loss/policy", stats['policy_loss'], self.total_steps)
+        self.writer.add_scalar("loss/value", stats['value_loss'], self.total_steps)
+        self.writer.add_scalar("policy/entropy", stats['entropy'], self.total_steps)
+        self.writer.add_scalar("policy/kl", stats['kl'], self.total_steps)
+        self.writer.add_scalar("policy/std_v", std[0], self.total_steps)
+        self.writer.add_scalar("policy/std_w", std[1], self.total_steps)
+        self.writer.add_scalar("reward/mean", mean_rew, self.total_steps)
+        self.writer.add_scalar("reward/return_mean", mean_ret, self.total_steps)
+    
+    def _save(self, rollout):
+        path = Path("checkpoints")
+        path.mkdir(exist_ok=True)
+        
+        torch.save({
+            "rollout": rollout,
+            "policy": self.policy.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "stage": self.env.curriculum_level,
+            "total_steps": self.total_steps,
+        }, path / f"state_ppo_rollout_{rollout}.pt")
+        
+        print(f"[SAVE] checkpoints/state_ppo_rollout_{rollout}.pt")
 
 
 # =============================================================================
@@ -320,83 +400,36 @@ class PPOAgent:
 
 def main():
     cfg = TekoEnvCfgState()
+    cfg.scene.num_envs = 500  # No vision = many more envs!
+    
+    print("[INFO] Creating state-based environment...")
     env = TekoEnvState(cfg=cfg)
-    device = env.device
     
-    policy = StateMLP(state_dim=4, action_dim=2, hidden_dim=128).to(device)
-    agent = PPOAgent(policy, PPO_CONFIG, device)
-    curriculum = CurriculumManager(env)
+    print("[INFO] Creating policy...")
+    policy = StatePolicy(state_dim=4, action_dim=2, hidden_dim=256).to("cuda")
+    print(f"[INFO] Parameters: {sum(p.numel() for p in policy.parameters()):,}")
     
-    run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ckpt_dir = Path(f"teko_state_debug/{run_name}")
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print("[INFO] Creating trainer...")
+    trainer = StatePPOTrainer(
+        env=env,
+        policy=policy,
+        lr=3e-4,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_epsilon=0.2,
+        entropy_coef=0.01,
+        value_coef=0.5,
+        rollout_steps=128,
+        batch_size=4096,
+        epochs=6,
+        ssr_threshold=0.70,
+        min_episodes=500,
+    )
     
-    # Training
-    obs, _ = env.reset()
-    state = obs["policy"]
+    print("[INFO] Starting training...")
+    trainer.train(total_rollouts=5000, log_interval=5, save_interval=100)
     
-    total_steps = 0
-    episode_rewards = []
-    rollout_count = 0
-    
-    print(f"\n🚀 State-based training (FIXED)")
-    print(f"   Envs: {cfg.num_envs}")
-    print(f"   Total steps: {PPO_CONFIG['total_timesteps']:,}")
-    print(f"   Fixes: log_std clamping, no noise, no time penalty")
-    print(f"   Checkpoints: {ckpt_dir}\n")
-    
-    while total_steps < PPO_CONFIG["total_timesteps"]:
-        # Collect rollout
-        for _ in range(PPO_CONFIG["rollout_steps"]):
-            action, value, log_prob = agent.act(state)
-            next_obs, reward, term, trunc, _ = env.step(action)
-            next_state = next_obs["policy"]
-            done = term | trunc
-            
-            # Compute success
-            _, _, surface_xy, _ = env.get_sphere_distances_from_physics()
-            success = surface_xy < 0.03
-            
-            agent.store_transition(state, action, reward, value, log_prob, done)
-            curriculum.update(done, success)
-            
-            state = next_state
-            total_steps += cfg.num_envs
-            
-            if done.any():
-                episode_rewards.extend(reward[done].cpu().tolist())
-        
-        # Update
-        losses = agent.update(state)
-        rollout_count += 1
-        
-        # Log every N rollouts
-        if rollout_count % PPO_CONFIG["log_interval"] == 0:
-            stats = curriculum.get_stats()
-            avg_r = np.mean(episode_rewards[-100:]) if episode_rewards else 0.0
-            
-            print(f"[{total_steps:>9}] S{stats['stage']:02d} | "
-                  f"SSR={stats['ssr']*100:4.1f}% | "
-                  f"R={avg_r:6.1f} | "
-                  f"VL={losses['value_loss']:6.2f} | "
-                  f"Ent={losses['entropy']:.3f} | "
-                  f"Ep={stats['episodes']:>6}/{stats['max_episodes']}")
-        
-        # Save checkpoints
-        if total_steps % PPO_CONFIG["save_interval"] < cfg.num_envs:
-            torch.save({
-                "policy": policy.state_dict(),
-                "log_std": agent.log_std,
-                "optimizer": agent.optimizer.state_dict(),
-                "total_steps": total_steps,
-                "stage": curriculum.current_stage,
-            }, ckpt_dir / f"ckpt_{total_steps}.pt")
-            print(f"💾 Checkpoint saved at step {total_steps}")
-    
-    print(f"\n✅ Training complete! Final stage: {curriculum.current_stage}/{NUM_STAGES-1}")
-    
-    env.close()
-    simulation_app.close()
+    print("\n✅ State-based training complete!")
 
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # Scene (84×84 allows more envs than 64×64)
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=50,  # 84×84 can handle 100+ envs
+        num_envs=70,  # 84×84 can handle 100+ envs
         env_spacing=6.0,
         replicate_physics=True,
     )
