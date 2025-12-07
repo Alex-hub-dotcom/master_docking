@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment - Curriculum Compatible (v8.5 - OPTIMIZED 64x64)
-==================================================================
-- 64x64 grayscale observations with FP16 frame stacking
+TEKO Environment - TiledCamera + Frame Stacking (v9.0)
+=======================================================
+- TiledCamera for efficient parallel rendering (single GPU pass)
+- 84x84 grayscale observations with 4-frame stacking
 - Supports multi-stage curriculum (17 stages)
-- Nuclear penalties (-500 collision/boundary)
-- Frame stacking with memory optimization
-- Pure shaping + terminal rewards
+- Asymmetric actor-critic (vision + privileged state)
+- Optimized for 256-512+ parallel environments
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -20,7 +20,7 @@ from pxr import Sdf, UsdGeom, UsdLux, Gf, UsdPhysics
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim import SimulationContext
-from isaaclab.sensors import Camera, CameraCfg
+from isaaclab.sensors import TiledCamera
 
 from .teko_env_cfg import TekoEnvCfg
 from .rewards.reward_functions import compute_total_reward
@@ -34,18 +34,19 @@ from .robots.teko_static import TEKOStatic
 
 class TekoEnv(DirectRLEnv):
     """
-    Torque-driven TEKO environment with curriculum learning.
-    v8.5: 64x64 grayscale observations with FP16 optimization
+    Torque-driven TEKO environment with TiledCamera and curriculum learning.
+    v9.0: TiledCamera for efficient batched rendering
     """
 
     cfg: TekoEnvCfg
 
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
-        # Camera resolution
-        self._cam_res = (cfg.camera.width, cfg.camera.height)
+        # Camera resolution from TiledCamera config
+        self._cam_width = cfg.tiled_camera.width
+        self._cam_height = cfg.tiled_camera.height
 
         # Frame stacking configuration
-        self.num_frame_stack = getattr(cfg, "num_frame_stack", 4)
+        self.num_frame_stack = cfg.num_frame_stack
         self.frame_stack = None
         self.frame_counts = None
 
@@ -65,7 +66,7 @@ class TekoEnv(DirectRLEnv):
         # Placeholders
         self.actions = None
         self.dof_idx = None
-        self.cameras = []
+        self.tiled_camera = None  # Single TiledCamera instead of list
         self.goal_positions = None
         self.num_agents = 1
         self._polarity = None
@@ -104,22 +105,33 @@ class TekoEnv(DirectRLEnv):
         import gymnasium as gym
 
         num_channels = self.num_frame_stack
-        frame_shape = (num_channels, self.cfg.camera.height, self.cfg.camera.width)
+        frame_shape = (num_channels, self._cam_height, self._cam_width)
 
-        self.observation_space = gym.spaces.Dict(
-            {
-                "rgb": gym.spaces.Box(
-                    low=0.0,
-                    high=1.0,
-                    shape=frame_shape,
-                    dtype=np.float32,
-                )
-            }
-        )
+        obs_dict = {
+            "rgb": gym.spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=frame_shape,
+                dtype=np.float32,
+            )
+        }
+
+        # Add privileged state if asymmetric critic enabled
+        if getattr(self.cfg, 'asymmetric_critic', False):
+            obs_dict["privileged"] = gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(7,),
+                dtype=np.float32,
+            )
+
+        self.observation_space = gym.spaces.Dict(obs_dict)
         print(
-            f"[INFO] Observation space set to {frame_shape} "
+            f"[INFO] Observation space: rgb={frame_shape} "
             f"(K={self.num_frame_stack} grayscale frames), range [0, 1]"
         )
+        if getattr(self.cfg, 'asymmetric_critic', False):
+            print(f"[INFO] Privileged state: (7,) [dx, dy, dz, yaw_err, vx, vy, w]")
 
     # ================================================================
     # Scene setup
@@ -144,8 +156,8 @@ class TekoEnv(DirectRLEnv):
         # Arena, goal robot, ground plane
         self._setup_per_environment_assets(stage)
 
-        # Cameras
-        self._setup_cameras()
+        # TiledCamera (single instance for ALL environments)
+        self._setup_tiled_camera()
 
         # Cache static robot positions
         self._cache_goal_transforms()
@@ -212,7 +224,9 @@ class TekoEnv(DirectRLEnv):
 
             try:
                 TEKOStatic(prim_path=f"{env_path}/RobotGoal")
-                print(f"[INFO] Spawned static TEKO goal in env_{env_idx}")
+                # Reduce spam - only print every 50 envs
+                if env_idx % 50 == 0:
+                    print(f"[INFO] Spawned static TEKO goals... (env_{env_idx})")
             except Exception as e:
                 print(f"[WARN] Failed to create static TEKO goal in env_{env_idx}: {e}")
 
@@ -223,27 +237,23 @@ class TekoEnv(DirectRLEnv):
 
         print(f"[INFO] Created {num_envs} environments.")
 
-    def _setup_cameras(self):
-        """Attach one camera to each environment."""
-        for env_idx in range(self.scene.cfg.num_envs):
-            cam_path = (
-                f"/World/envs/env_{env_idx}/Robot/teko_urdf/TEKO_Body/"
-                "TEKO_WallBack/TEKO_Camera/RearCamera"
-            )
-
-            cam_cfg = CameraCfg(
-                prim_path=cam_path,
-                update_period=0,
-                height=self._cam_res[1],
-                width=self._cam_res[0],
-                data_types=["rgb"],
-                spawn=None,
-            )
-
-            camera = Camera(cfg=cam_cfg)
-            self.cameras.append(camera)
-
-        print(f"[INFO] Initialized {len(self.cameras)} cameras.")
+    def _setup_tiled_camera(self):
+        """
+        Setup TiledCamera for efficient batched rendering.
+        
+        Single TiledCamera instance renders ALL environment cameras
+        in one GPU pass, returning [num_envs, H, W, C] tensor.
+        """
+        self.tiled_camera = TiledCamera(self.cfg.tiled_camera)
+        
+        # Register with scene for automatic updates
+        self.scene.sensors["tiled_camera"] = self.tiled_camera
+        
+        print(
+            f"[INFO] TiledCamera initialized: "
+            f"{self.scene.cfg.num_envs} cameras @ {self._cam_width}x{self._cam_height} "
+            f"(single batched render pass)"
+        )
 
     def _cache_goal_transforms(self):
         """Precompute goal positions."""
@@ -385,19 +395,22 @@ class TekoEnv(DirectRLEnv):
         )
 
     # ------------------------------------------------------------------
-    # Observations (WITH FP16 OPTIMIZATION)
+    # Observations (TiledCamera + Frame Stacking)
     # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
-        """Capture RGB + privileged state for asymmetric critic."""
-        import torch.nn.functional as F
-
+        """
+        Capture RGB from TiledCamera + privileged state for asymmetric critic.
+        
+        TiledCamera returns [num_envs, H, W, C] in a single batched call.
+        No per-environment loop needed!
+        """
         num_envs = self.scene.cfg.num_envs
-        h, w = self._cam_res[1], self._cam_res[0]
+        h, w = self._cam_height, self._cam_width
 
         # Initialize frame stack with FP16 for memory efficiency
         if self.frame_stack is None:
             self.frame_stack = torch.zeros(
-                (num_envs, self.num_frame_stack, 1, h, w),
+                (num_envs, self.num_frame_stack, h, w),
                 device=self.device, dtype=torch.float16,
             )
         if self.frame_counts is None:
@@ -405,49 +418,62 @@ class TekoEnv(DirectRLEnv):
                 num_envs, device=self.device, dtype=torch.int32
             )
 
-        gray_current = torch.zeros((num_envs, 1, h, w), device=self.device, dtype=torch.float16)
+        # =============================================================
+        # TiledCamera: Get ALL images in ONE call
+        # Output shape: [num_envs, H, W, C] where C=3 for RGB
+        # =============================================================
+        rgb_data = self.tiled_camera.data.output["rgb"]
 
-        for env_idx, cam in enumerate(self.cameras):
-            cam.update(dt=0.0)
-            rgb_data = cam.data.output["rgb"]
-            if rgb_data is None or rgb_data.numel() == 0:
-                continue
-
-            if rgb_data.ndim == 4:
-                rgb_data = rgb_data.squeeze(0)
+        
+        if rgb_data is not None and rgb_data.numel() > 0:
+            # rgb_data shape: [num_envs, H, W, 4] (RGBA) or [num_envs, H, W, 3] (RGB)
             if rgb_data.shape[-1] == 4:
-                rgb_data = rgb_data[..., :3]
-
-            rgb = rgb_data.permute(2, 0, 1).float() / 255.0
-
-            if rgb.shape[1] != h or rgb.shape[2] != w:
-                rgb = F.interpolate(
-                    rgb.unsqueeze(0), size=(h, w),
-                    mode="bilinear", align_corners=False
-                ).squeeze(0)
-
-            gray = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-            gray = gray.unsqueeze(0).half()
-            gray_current[env_idx] = gray
-
+                rgb_data = rgb_data[..., :3]  # Drop alpha channel
+            
+            # Convert to float and normalize [0, 1]
+            rgb = rgb_data.float() / 255.0
+            
+            # Convert RGB to grayscale: [num_envs, H, W]
+            gray_current = (
+                0.299 * rgb[..., 0] + 
+                0.587 * rgb[..., 1] + 
+                0.114 * rgb[..., 2]
+            ).half()  # FP16 for memory
+        else:
+            # Fallback: black frames if camera not ready
+            gray_current = torch.zeros(
+                (num_envs, h, w), device=self.device, dtype=torch.float16
+            )
+        # DEBUG: Check TiledCamera output
+        #if self.episode_length_buf[0] == 1:  # First step only
+            #print(f"[DEBUG] rgb_data shape: {rgb_data.shape}")
+            #print(f"[DEBUG] rgb_data dtype: {rgb_data.dtype}")
+            #print(f"[DEBUG] rgb_data min/max: {rgb_data.min().item():.2f} / {rgb_data.max().item():.2f}")
+            #print(f"[DEBUG] gray_current shape: {gray_current.shape}")
+            #print(f"[DEBUG] gray_current min/max: {gray_current.min().item():.4f} / {gray_current.max().item():.4f}")
+            # =============================================================
+        # Frame stacking logic
+        # =============================================================
         reset_mask = self.frame_counts == 0
         if reset_mask.any():
+            # For reset envs: fill all frames with current frame
             idx = reset_mask.nonzero(as_tuple=False).squeeze(-1)
-            self.frame_stack[idx, :, :, :, :] = gray_current[idx].unsqueeze(1)
+            self.frame_stack[idx] = gray_current[idx].unsqueeze(1).expand(-1, self.num_frame_stack, -1, -1)
             self.frame_counts[idx] = self.num_frame_stack
 
         non_reset_mask = ~reset_mask
         if non_reset_mask.any():
+            # For non-reset envs: shift frames and add new
             idx = non_reset_mask.nonzero(as_tuple=False).squeeze(-1)
             self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
             self.frame_stack[idx, -1] = gray_current[idx]
 
-        # Convert back to FP32 for policy
-        stacked = self.frame_stack.squeeze(2).float()
-        
-        # ============================================================
-        # ADD PRIVILEGED STATE IF ASYMMETRIC CRITIC ENABLED
-        # ============================================================
+        # Convert to FP32 for policy: [num_envs, num_frame_stack, H, W]
+        stacked = self.frame_stack.float()
+
+        # =============================================================
+        # Add privileged state if asymmetric critic enabled
+        # =============================================================
         if getattr(self.cfg, 'asymmetric_critic', False):
             robot_pos = self.robot.data.root_pos_w
             goal_pos = self.goal_positions
@@ -481,13 +507,14 @@ class TekoEnv(DirectRLEnv):
             }
         else:
             return {"rgb": stacked}
-        
+
     def _extract_yaw(self, quat: torch.Tensor) -> torch.Tensor:
         """Extract yaw angle from quaternion [x, y, z, w]."""
         qx, qy, qz, qw = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         siny_cosp = 2.0 * (qw * qz + qx * qy)
         cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
         return torch.atan2(siny_cosp, cosy_cosp)
+
     # ------------------------------------------------------------------
     # Rewards
     # ------------------------------------------------------------------
@@ -547,9 +574,6 @@ class TekoEnv(DirectRLEnv):
 
         terminated = success | out_of_bounds | collision
         time_out = self.episode_length_buf >= self.max_episode_length
-
-        #if success.any():
-        #   print(f"[SUCCESS] {int(success.sum().item())} dockings!")
 
         return terminated, time_out
 

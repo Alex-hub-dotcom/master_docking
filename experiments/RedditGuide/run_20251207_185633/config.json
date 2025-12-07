@@ -1,0 +1,15 @@
+{
+  "run_id": "run_20251207_185633",
+  "num_envs": 150,
+  "gamma": 0.99,
+  "gae_lambda": 0.95,
+  "clip_epsilon": 0.2,
+  "entropy_coef": 0.01,
+  "value_loss_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "rollout_steps": 256,
+  "batch_size": 2048,
+  "epochs": 6,
+  "ssr_threshold": 0.7,
+  "min_episodes_for_advancement": 500
+}

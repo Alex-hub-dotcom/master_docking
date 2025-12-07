@@ -23,6 +23,7 @@ simulation_app = app_launcher.app
 
 import os
 import sys
+import json
 import torch
 import numpy as np
 from datetime import datetime
@@ -216,7 +217,7 @@ class AsymmetricActorCritic(torch.nn.Module):
 
 
 # =============================================================================
-# PPO TRAINER WITH CURRICULUM
+# PPO TRAINER WITH CURRICULUM + LOGGING (RedditGuide)
 # =============================================================================
 
 class AsymmetricPPOTrainer:
@@ -246,7 +247,9 @@ class AsymmetricPPOTrainer:
         self.policy = policy
         self.device = device
         
+        # ------------------------------------------------------------------
         # Hyperparameters
+        # ------------------------------------------------------------------
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_epsilon = clip_epsilon
@@ -261,7 +264,50 @@ class AsymmetricPPOTrainer:
         self.ssr_threshold = ssr_threshold
         self.min_episodes_for_advancement = min_episodes_for_advancement
         
-        # Optimizer (include log_std in optimization!)
+        # ------------------------------------------------------------------
+        # RUN / LOGGING SETUP (Project name: RedditGuide)
+        # ------------------------------------------------------------------
+        # Project root: experiments/RedditGuide
+        self.project_root = Path("experiments") / "RedditGuide"
+        self.project_root.mkdir(parents=True, exist_ok=True)
+
+        # Unique run ID (timestamp based)
+        self.run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+
+        # Run directory: experiments/RedditGuide/run_YYYYMMDD_HHMMSS
+        self.run_dir = self.project_root / self.run_id
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Checkpoints directory
+        self.ckpt_dir = self.run_dir / "checkpoints"
+        self.ckpt_dir.mkdir(exist_ok=True)
+
+        # TensorBoard directory
+        self.tb_dir = self.run_dir / "tb"
+        self.tb_dir.mkdir(exist_ok=True)
+
+        # Save run config
+        config = {
+            "run_id": self.run_id,
+            "num_envs": self.env.num_envs,
+            "gamma": self.gamma,
+            "gae_lambda": self.gae_lambda,
+            "clip_epsilon": self.clip_epsilon,
+            "entropy_coef": self.entropy_coef,
+            "value_loss_coef": self.value_loss_coef,
+            "max_grad_norm": self.max_gradNorm if hasattr(self, "max_gradNorm") else self.max_grad_norm,
+            "rollout_steps": self.rollout_steps,
+            "batch_size": self.batch_size,
+            "epochs": self.epochs,
+            "ssr_threshold": self.ssr_threshold,
+            "min_episodes_for_advancement": self.min_episodes_for_advancement,
+        }
+        with open(self.run_dir / "config.json", "w") as f:
+            json.dump(config, f, indent=2)
+
+        # ------------------------------------------------------------------
+        # Optimizer & statistics
+        # ------------------------------------------------------------------
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(), 
             lr=learning_rate
@@ -286,8 +332,8 @@ class AsymmetricPPOTrainer:
         # Success threshold (reward indicating success)
         self.success_reward_threshold = 350.0  # Success bonus is 400
         
-        # TensorBoard
-        self.writer = SummaryWriter(f"runs/vision_ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        # TensorBoard writer (inside this run directory)
+        self.writer = SummaryWriter(log_dir=str(self.tb_dir))
         
     def collect_rollout(self):
         """Collect rollout data with success tracking."""
@@ -539,6 +585,12 @@ class AsymmetricPPOTrainer:
         print(f"\n{'='*80}")
         print(f"ASYMMETRIC ACTOR-CRITIC PPO TRAINING (v2.0)")
         print(f"{'='*80}")
+        print(f"Project root: {self.project_root}")
+        print(f"Run ID     : {self.run_id}")
+        print(f"Run dir    : {self.run_dir}")
+        print(f"TB logs    : {self.tb_dir}")
+        print(f"Checkpoints: {self.ckpt_dir}")
+        print(f"{'-'*80}")
         print(f"Environments: {self.env.num_envs}")
         print(f"Rollout steps: {self.rollout_steps}")
         print(f"Batch size: {self.batch_size}")
@@ -547,6 +599,8 @@ class AsymmetricPPOTrainer:
         print(f"SSR threshold for advancement: {self.ssr_threshold:.1%}")
         print(f"Min episodes per stage: {self.min_episodes_for_advancement}")
         print(f"{'='*80}\n")
+        print("To view in TensorBoard, run:")
+        print(f"  tensorboard --logdir {self.project_root}\n")
         
         for rollout_idx in range(total_rollouts):
             # Collect rollout
@@ -623,6 +677,7 @@ class AsymmetricPPOTrainer:
     def _save_checkpoint(self, rollout_idx):
         """Save model checkpoint."""
         checkpoint = {
+            "run_id": self.run_id,
             "rollout": rollout_idx,
             "total_steps": self.total_steps,
             "total_episodes": self.total_episodes,
@@ -634,15 +689,13 @@ class AsymmetricPPOTrainer:
             "stage_steps": self.stage_steps,
         }
         
-        save_dir = Path("checkpoints")
-        save_dir.mkdir(exist_ok=True)
-        
-        save_path = save_dir / f"asymmetric_ppo_v2_rollout_{rollout_idx}.pt"
+        # Run-specific checkpoint path
+        save_path = self.ckpt_dir / f"checkpoint_rollout_{rollout_idx:05d}.pt"
         torch.save(checkpoint, save_path)
-        print(f"[CHECKPOINT] Saved to {save_path}")
+        print(f"[CHECKPOINT] [{self.run_id}] Saved to {save_path}")
         
-        # Also save "latest" for easy resumption
-        latest_path = save_dir / "asymmetric_ppo_v2_latest.pt"
+        # Also save "latest" for this run
+        latest_path = self.ckpt_dir / "latest.pt"
         torch.save(checkpoint, latest_path)
 
 
@@ -667,10 +720,11 @@ def main():
     
     # Environment config
     env_cfg = TekoEnvCfg()
-    env_cfg.scene.num_envs = 50
+    env_cfg.scene.num_envs = 150
+
     env_cfg.asymmetric_critic = True
-    env_cfg.camera.width = 84
-    env_cfg.camera.height = 84
+    env_cfg.tiled_camera.width = 84
+    env_cfg.tiled_camera.height = 84
     
     print("[INFO] Creating environment...")
     env = TekoEnv(cfg=env_cfg)
@@ -686,7 +740,7 @@ def main():
         gamma=0.99,
         gae_lambda=0.95,
         clip_epsilon=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.025,
         value_loss_coef=0.5,
         max_grad_norm=0.5,
         rollout_steps=256,
