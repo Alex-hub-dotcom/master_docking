@@ -131,11 +131,16 @@ class TekoEnvState(TekoEnv):
             ~raw_success &
             (self.episode_length_buf >= min_collision_steps)
         )
+
+        # 🔴 IMPORTANTE: guardar flags antes do reset
+        self._last_success = success.clone()
+        self._last_out_of_bounds = out_of_bounds.clone()
+        self._last_collision = collision.clone()
         
         terminated = success | out_of_bounds | collision
         time_out = self.episode_length_buf >= self.max_episode_length
         
-        # SILENCED - no more spam!
+        # Se quiseres debug visual, podes descomentar:
         # if success.any():
         #     print(f"[SUCCESS] {int(success.sum().item())} dockings!")
         

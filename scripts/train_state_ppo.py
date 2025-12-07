@@ -14,6 +14,7 @@ If this fails → fix reward/curriculum first
 Author: Alexandre Schleier Neves da Silva
 Date: December 2024
 """
+
 from isaaclab.app import AppLauncher
 
 app_launcher = AppLauncher({
@@ -148,8 +149,12 @@ class StatePPOTrainer:
         self.batch_size = batch_size
         self.epochs = epochs
         
-        self.ssr_threshold = ssr_threshold
+        # Curriculum / SSR thresholds
+        self.default_ssr_threshold = ssr_threshold
         self.min_episodes = min_episodes
+
+        cfg = getattr(env, "cfg", None)
+        self.stage_thresholds = getattr(cfg, "stage_thresholds", None)
         
         self.optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
         
@@ -161,6 +166,7 @@ class StatePPOTrainer:
         self.stage_steps = 0
         self.ssr_window = deque(maxlen=1000)
         
+        # Reward-based success threshold (não usado para SSR, só se quiseres debug futuro)
         self.success_threshold = 350.0
         
         # TensorBoard
@@ -194,18 +200,25 @@ class StatePPOTrainer:
             rewards.append(reward.clone())
             dones.append(done.clone())
             
-            # Track successes
+            # Track successes usando critério geométrico (_last_success do env)
             if done.any():
                 done_idx = done.nonzero(as_tuple=False).squeeze(-1)
-                done_rewards = reward[done_idx]
-                successes = (done_rewards > self.success_threshold).sum().item()
+
+                success_buf = getattr(self.env, "_last_success", None)
+                if success_buf is None:
+                    success_flag = torch.zeros_like(done, dtype=torch.bool)
+                else:
+                    success_flag = success_buf
+
+                successes = success_flag[done_idx].sum().item()
                 num_done = done_idx.shape[0]
                 
                 rollout_successes += successes
                 rollout_episodes += num_done
                 
+                # Rolling SSR window
                 for i in range(num_done):
-                    self.ssr_window.append(1 if done_rewards[i].item() > self.success_threshold else 0)
+                    self.ssr_window.append(1 if success_flag[done_idx[i]].item() else 0)
             
             self.total_steps += num_envs
             self.stage_steps += num_envs
@@ -300,21 +313,28 @@ class StatePPOTrainer:
         return {k: v / n_updates for k, v in stats.items()}
     
     def check_advancement(self):
+        """Decide se avança de estágio com base no SSR físico."""
         if self.stage_episodes < self.min_episodes:
             return False
         
-        ssr = self.stage_successes / self.stage_episodes if self.stage_episodes > 0 else 0
+        ssr = self.stage_successes / self.stage_episodes if self.stage_episodes > 0 else 0.0
+        current = int(self.env.curriculum_level)
+
+        if self.stage_thresholds is not None:
+            required = self.stage_thresholds.get(current, self.default_ssr_threshold)
+        else:
+            required = self.default_ssr_threshold
         
-        if ssr >= self.ssr_threshold:
-            current = self.env.curriculum_level
+        if ssr >= required:
             next_stage = min(current + 1, NUM_STAGES - 1)
             
             if next_stage > current:
                 print(f"\n{'='*70}")
                 print(f"🎉 ADVANCEMENT: Stage {current} → {next_stage}")
-                print(f"   SSR: {ssr:.1%} | Episodes: {self.stage_episodes}")
+                print(f"   SSR: {ssr:.1%} | Required: {required:.1%} | Episodes: {self.stage_episodes}")
                 print(f"{'='*70}\n")
                 
+                # Env deve ter método set_curriculum_level
                 self.env.set_curriculum_level(next_stage)
                 self.stage_successes = 0
                 self.stage_episodes = 0
@@ -328,7 +348,7 @@ class StatePPOTrainer:
         print("STATE-BASED PPO TRAINING (Debugging)")
         print(f"{'='*70}")
         print(f"Envs: {self.env.num_envs} | Rollout: {self.rollout_steps}")
-        print(f"SSR threshold: {self.ssr_threshold:.0%} | Min episodes: {self.min_episodes}")
+        print(f"Min episodes per stage: {self.min_episodes}")
         print(f"{'='*70}\n")
         
         for rollout in range(total_rollouts):
@@ -343,9 +363,14 @@ class StatePPOTrainer:
                 self._save(rollout + 1)
     
     def _log(self, rollout, data, stats):
-        stage = self.env.curriculum_level
-        ssr = self.stage_successes / self.stage_episodes if self.stage_episodes > 0 else 0
-        rolling = sum(self.ssr_window) / len(self.ssr_window) if self.ssr_window else 0
+        stage = int(self.env.curriculum_level)
+        ssr = self.stage_successes / self.stage_episodes if self.stage_episodes > 0 else 0.0
+        rolling = sum(self.ssr_window) / len(self.ssr_window) if self.ssr_window else 0.0
+
+        if self.stage_thresholds is not None:
+            required = self.stage_thresholds.get(stage, self.default_ssr_threshold)
+        else:
+            required = self.default_ssr_threshold
         
         log_std = self.policy.log_std.data.cpu().numpy()
         std = np.exp(np.clip(log_std, -2, 0.5))
@@ -354,11 +379,11 @@ class StatePPOTrainer:
         mean_rew = data["rewards"].mean().item()
         
         print(f"\n{'='*70}")
-        print(f"Rollout {rollout} | Stage S{stage} | Steps: {self.stage_steps:,}")
+        print(f"Rollout {rollout} | Stage S{stage} | Steps in stage: {self.stage_steps:,}")
         print(f"{'-'*70}")
         print(f"Total: {self.total_steps:,} steps | {self.total_episodes:,} episodes")
         print(f"Stage: {self.stage_episodes} eps | {self.stage_successes} success | SSR: {ssr:.1%}")
-        print(f"Rolling SSR: {rolling:.1%} | Threshold: {self.ssr_threshold:.0%}")
+        print(f"Rolling SSR: {rolling:.1%} | Required: {required:.0%}")
         print(f"{'-'*70}")
         print(f"Policy: {stats['policy_loss']:.4f} | Value: {stats['value_loss']:.4f}")
         print(f"Entropy: {stats['entropy']:.4f} | KL: {stats['kl']:.4f}")
@@ -387,7 +412,7 @@ class StatePPOTrainer:
             "rollout": rollout,
             "policy": self.policy.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "stage": self.env.curriculum_level,
+            "stage": int(self.env.curriculum_level),
             "total_steps": self.total_steps,
         }, path / f"state_ppo_rollout_{rollout}.pt")
         
@@ -400,7 +425,9 @@ class StatePPOTrainer:
 
 def main():
     cfg = TekoEnvCfgState()
-    cfg.scene.num_envs = 500  # No vision = many more envs!
+    # Sem visão podemos meter muitos envs
+    cfg.num_envs = 1000
+    cfg.scene.num_envs = 1000
     
     print("[INFO] Creating state-based environment...")
     env = TekoEnvState(cfg=cfg)
@@ -422,7 +449,7 @@ def main():
         rollout_steps=128,
         batch_size=4096,
         epochs=6,
-        ssr_threshold=0.70,
+        ssr_threshold=0.70,   # default se não houver stage_thresholds no cfg
         min_episodes=500,
     )
     

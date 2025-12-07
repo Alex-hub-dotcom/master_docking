@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward Functions for TEKO Docking (v9.3 – UNIFIED FINAL)
+Reward Functions for TEKO Docking (v9.4 – UNIFIED FINAL)
 ========================================================
 
 Unified reward function for both state-based and vision-based training.
@@ -19,6 +19,7 @@ Reward structure:
 4. Facing bonus        - Bonus when well-aligned and close
 5. Approach bonus      - Bonus for approaching while aligned
 6. Turning bonus       - Bonus for correcting misalignment
+                         + small penalty for turning the wrong way
 7. Collision penalty   - Terminal penalty for crashes
 8. Boundary penalty    - Terminal penalty for leaving arena
 9. Success bonus       - Terminal reward for docking
@@ -46,7 +47,8 @@ REWARD_CONFIG = {
     "progress_min": -4.0,
     "progress_max": 4.0,
     
-    "alignment_scale": 0.20,
+    # ↑ mais peso no alinhamento
+    "alignment_scale": 0.40,   # antes 0.20
     
     "facing_bonus": 1.0,
     "facing_threshold_deg": 20.0,
@@ -54,7 +56,8 @@ REWARD_CONFIG = {
     
     "approach_scale": 2.0,
     
-    "turning_bonus": 0.7,
+    # Turning: bónus maior e usado também para pequena penalização
+    "turning_bonus": 1.0,      # antes 0.7
     "turning_threshold_deg": 10.0,
     
     # Terminal rewards
@@ -96,8 +99,11 @@ def _extract_yaw(quat: torch.Tensor) -> torch.Tensor:
     return torch.atan2(siny_cosp, cosy_cosp)
 
 
-def _compute_yaw_error(robot_yaw: torch.Tensor, robot_pos: torch.Tensor, 
-                        goal_pos: torch.Tensor) -> torch.Tensor:
+def _compute_yaw_error(
+    robot_yaw: torch.Tensor,
+    robot_pos: torch.Tensor,
+    goal_pos: torch.Tensor,
+) -> torch.Tensor:
     """Compute yaw error between robot rear and goal direction."""
     vec_to_goal = goal_pos - robot_pos
     goal_yaw = torch.atan2(vec_to_goal[:, 1], vec_to_goal[:, 0])
@@ -138,8 +144,10 @@ def _compute_alignment_reward(yaw_error_abs: torch.Tensor) -> torch.Tensor:
     return cfg["alignment_scale"] * (1.0 - normalized_error)
 
 
-def _compute_facing_bonus(yaw_error_abs: torch.Tensor, 
-                          surface_xy: torch.Tensor) -> torch.Tensor:
+def _compute_facing_bonus(
+    yaw_error_abs: torch.Tensor,
+    surface_xy: torch.Tensor,
+) -> torch.Tensor:
     """Bonus when well-aligned and close."""
     cfg = REWARD_CONFIG
     threshold = np.deg2rad(cfg["facing_threshold_deg"])
@@ -154,8 +162,11 @@ def _compute_facing_bonus(yaw_error_abs: torch.Tensor,
     )
 
 
-def _compute_approach_bonus(progress: torch.Tensor, yaw_error_abs: torch.Tensor,
-                            surface_xy: torch.Tensor) -> torch.Tensor:
+def _compute_approach_bonus(
+    progress: torch.Tensor,
+    yaw_error_abs: torch.Tensor,
+    surface_xy: torch.Tensor,
+) -> torch.Tensor:
     """Bonus for approaching while aligned."""
     cfg = REWARD_CONFIG
     threshold = np.deg2rad(cfg["facing_threshold_deg"])
@@ -171,21 +182,44 @@ def _compute_approach_bonus(progress: torch.Tensor, yaw_error_abs: torch.Tensor,
     )
 
 
-def _compute_turning_bonus(yaw_error: torch.Tensor, yaw_error_abs: torch.Tensor,
-                           ang_vel: torch.Tensor, surface_xy: torch.Tensor) -> torch.Tensor:
-    """Bonus for turning toward goal when misaligned."""
+def _compute_turning_bonus(
+    yaw_error: torch.Tensor,
+    yaw_error_abs: torch.Tensor,
+    ang_vel: torch.Tensor,
+    surface_xy: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Bonus (and small penalty) for direction of rotation.
+
+    - If misaligned and turning towards the goal → +turning_bonus
+    - If misaligned and turning away from the goal → -0.5 * turning_bonus
+    """
     cfg = REWARD_CONFIG
     threshold = np.deg2rad(cfg["turning_threshold_deg"])
     
     yaw_rate = ang_vel[:, 2]
-    turning_correct = (yaw_error * yaw_rate) < 0
     is_misaligned = yaw_error_abs > threshold
     
-    return torch.where(
+    turning_correct = (yaw_error * yaw_rate) < 0   # roda para o alvo
+    turning_wrong   = (yaw_error * yaw_rate) > 0   # roda para longe
+    
+    bonus = torch.zeros_like(surface_xy)
+    
+    # Bónus quando roda na direção certa
+    bonus = torch.where(
         is_misaligned & turning_correct,
         torch.full_like(surface_xy, cfg["turning_bonus"]),
-        torch.zeros_like(surface_xy),
+        bonus,
     )
+    
+    # Pequena penalização quando roda na direção errada
+    bonus = torch.where(
+        is_misaligned & turning_wrong,
+        torch.full_like(surface_xy, -0.5 * cfg["turning_bonus"]),
+        bonus,
+    )
+    
+    return bonus
 
 
 def _compute_collision_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
@@ -209,10 +243,10 @@ def _compute_collision_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
     ep_len = env.episode_length_buf
     
     collision = (
-        overlap & 
-        (speed > cfg["collision_speed_threshold"]) & 
-        (~raw_success) & 
-        (ep_len >= cfg["collision_min_steps"])
+        overlap
+        & (speed > cfg["collision_speed_threshold"])
+        & (~raw_success)
+        & (ep_len >= cfg["collision_min_steps"])
     )
     
     return torch.where(
