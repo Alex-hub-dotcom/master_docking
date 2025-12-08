@@ -736,21 +736,21 @@ def main():
     trainer = AsymmetricPPOTrainer(
         env=env,
         policy=policy,
-        learning_rate=3e-4,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_epsilon=0.2,
-        entropy_coef=0.025,
-        value_loss_coef=0.5,
-        max_grad_norm=0.5,
-        rollout_steps=256,
-        batch_size=2048,
-        epochs=6,
+        learning_rate=3e-4, ### float maybe logarithmic
+        gamma=0.99,         ### float maybe logarithmic
+        gae_lambda=0.95,    # NO
+        clip_epsilon=0.2,   ## float use steps -- not too many
+        entropy_coef=0.025, ## float use steps -- not too many
+        value_loss_coef=0.5,## float use steps -- not too many
+        max_grad_norm=0.5,  # NO 
+        rollout_steps=256,  # NO -- not too small!!!!! 80%
+        batch_size=2048,    ## int maybe logarithmic --> best would be categrical
+        epochs=6,           ## int                   --> best would be categrical
         device="cuda",
         # Curriculum settings
-        ssr_threshold=0.70,           # 70% success rate to advance
-        min_episodes_for_advancement=500,  # Min episodes before checking
-        ssr_window_size=1000,         # Rolling window for SSR
+        ssr_threshold=0.70,                 ## float use steps -- not too many       # 70% success rate to advance
+        min_episodes_for_advancement=500,   # NO # Min episodes before checking
+        ssr_window_size=1000,               # NO # Rolling window for SSR
     )
     
     print("[INFO] Starting training...")
