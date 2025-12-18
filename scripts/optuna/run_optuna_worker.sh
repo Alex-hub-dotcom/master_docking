@@ -25,7 +25,7 @@ cd /home/schux00/teko
 
 enroot start --rw \
     --mount /home/schux00/teko:/workspace/teko \
-    --mount /home/schux00/optuna:/home/schux00/optuna:rw \
+    --mount /home/schux00/optuna:/home/schux00/optuna \
     --mount /home/schux00/logs:/workspace/logs \
     --env PYTHONPATH=/workspace/teko/source/teko \
     --env PYTHONUNBUFFERED=1 \
