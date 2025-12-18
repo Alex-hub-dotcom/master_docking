@@ -1,18 +1,23 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment Configuration (Torque-driven, Modular)
--------------------------------------------------------
+TEKO Environment Configuration (TiledCamera + Frame Stacking) NOVO
+--------------------------------------------------------------
 Optimized for:
-- 84×84 grayscale observations (4-frame stack)
-- 60 parallel environments
+- TiledCamera for efficient parallel rendering
+- 84×84 grayscale observations with 4-frame stacking
+- Asymmetric actor-critic (vision + privileged state)
+- 200-500+ parallel environments on RTX 3090
 
 Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
 """
 
 from __future__ import annotations
+
+import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
@@ -21,17 +26,27 @@ from teko.tasks.direct.teko.robots.teko import TEKO_CONFIGURATION
 
 @configclass
 class TekoEnvCfg(DirectRLEnvCfg):
-    """Environment configuration for torque-driven TEKO robot."""
+    """Environment configuration for torque-driven TEKO robot with TiledCamera."""
 
     # ------------------------------------------------------------------
     # General parameters
     # ------------------------------------------------------------------
     decimation = 2
     episode_length_s = 15.0
-    enable_curriculum = False
+    enable_curriculum = True
 
     debug_boundaries: bool = False
     debug_robot_boxes: bool = False
+
+    # ------------------------------------------------------------------
+    # Asymmetric actor-critic flag
+    # ------------------------------------------------------------------
+    asymmetric_critic: bool = True
+
+    # ------------------------------------------------------------------
+    # Frame stacking
+    # ------------------------------------------------------------------
+    num_frame_stack: int = 4
 
     # ------------------------------------------------------------------
     # Arena limits
@@ -58,10 +73,10 @@ class TekoEnvCfg(DirectRLEnvCfg):
     )
 
     # ------------------------------------------------------------------
-    # Scene
+    # Scene - INCREASED num_envs for TiledCamera efficiency
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=60,
+        num_envs=256,  # TiledCamera allows many more envs
         env_spacing=6.0,
         replicate_physics=True,
     )
@@ -93,30 +108,23 @@ class TekoEnvCfg(DirectRLEnvCfg):
     wheel_polarity = [1.0, -1.0, 1.0, -1.0]
 
     # ------------------------------------------------------------------
-    # Camera Configuration (84×84)
+    # TiledCamera Configuration (replaces per-env Camera)
     # ------------------------------------------------------------------
-    @configclass
-    class CameraCfg:
-        """Rear grayscale camera for RL docking."""
-
-        prim_path = (
-            "/World/envs/env_.*/Robot/teko_urdf/TEKO_Body/"
-            "TEKO_WallBack/TEKO_Camera/RearCamera"
-        )
-
-        width = 84
-        height = 84
-
-        frequency_hz = 15
-        focal_length = 3.6
-        horiz_aperture = 4.8
-        vert_aperture = 3.6
-        f_stop = 16.0
-        focus_distance = 2.0
-
-        grayscale = True
-
-    camera = CameraCfg()
+    # Uses regex pattern to match all camera prims across environments
+    # Returns batched tensor [num_envs, H, W, C] in single render pass
+    # ------------------------------------------------------------------
+    tiled_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            convention="world",
+        ),
+        data_types=["rgb"],
+        spawn=None,  # <-- CHANGE THIS: Don't spawn, camera already exists in URDF
+        width=84,
+        height=84,
+    )
 
     # ------------------------------------------------------------------
     # Static goal robot
@@ -138,6 +146,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------
     action_space = (2,)
 
+    # Frame-stacked grayscale: [num_frame_stack, H, W]
     observation_space = {
-        "rgb": (4, 84, 84),
+        "rgb": (4, 84, 84),          # 4-frame stack of grayscale
+        "privileged": (7,),          # [dx, dy, dz, yaw_err, vx, vy, w]
     }
