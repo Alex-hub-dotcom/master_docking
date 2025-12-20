@@ -35,8 +35,8 @@ from isaaclab.app import AppLauncher
 # =============================================================================
 
 OPTUNA_CONFIG = {
-    "study_name": "teko_nsgaii_v1",
-    "storage_path": "/home/schux00/optuna/teko_nsgaii.db",
+    "study_name": "teko_nsgaii_128px",
+    "storage_path": "/home/schux00/optuna/teko_nsgaii_128px.db",
     "n_trials": 150,
     "max_steps_per_trial": 5_000_000,  # 3M para mais trials
     "eval_interval": 25_000,
@@ -68,11 +68,11 @@ class SimpleCNN(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=6, stride=3, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
-        self.ln1 = nn.LayerNorm([32, 27, 27])
-        self.ln2 = nn.LayerNorm([64, 13, 13])
-        self.ln3 = nn.LayerNorm([128, 7, 7])
+        self.ln1 = nn.LayerNorm([32, 42, 42])
+        self.ln2 = nn.LayerNorm([64, 21, 21])
+        self.ln3 = nn.LayerNorm([128, 11, 11])
         self.fc = nn.Sequential(
-            nn.Linear(6272, 512), nn.ReLU(inplace=True),
+            nn.Linear(15488, 512), nn.ReLU(inplace=True),
             nn.Linear(512, feature_dim), nn.ReLU(inplace=True),
         )
         self.feature_dim = feature_dim
@@ -181,7 +181,7 @@ def ppo_update(policy, optimizer, obs_rgb, obs_priv, actions, old_log_probs,
     T, N = obs_rgb.shape[:2]
     total = T * N
     
-    obs_rgb_flat = obs_rgb.view(total, 4, 84, 84)
+    obs_rgb_flat = obs_rgb.view(total, 4, 128, 128)
     obs_priv_flat = obs_priv.view(total, -1) if obs_priv is not None else None
     actions_flat = actions.view(total, 2)
     old_logp_flat = old_log_probs.view(-1)
