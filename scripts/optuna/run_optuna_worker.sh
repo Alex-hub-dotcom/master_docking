@@ -31,7 +31,7 @@ enroot start --rw \
     --env PYTHONUNBUFFERED=1 \
     /home/schux00/alex_optuna_isaac.sqsh \
     /workspace/isaaclab/_isaac_sim/python.sh -u \
-        /workspace/teko/scripts/optuna/train_optuna_ppo.py \
+        /workspace/teko/scripts/optuna/train_optuna_nsgaii.py \
         --headless
 
 echo "=============================================="

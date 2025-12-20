@@ -48,7 +48,7 @@ STAGE_NAMES = [
     "Stage 9:  Offset (±13°, ±3 cm)",
     "Stage 10: Offset (±15°, ±3 cm)",
     "Stage 11: Offset (±17°, ±3 cm)",
-    "Stage 12: Offset (±19°, ±4 cm)",
+    "Stage 12: Offset (±19°, ±3 cm)",
     
     # Ultra micro-steps (S13-S22): Fine-grained progression
     "Stage 13: Offset (±20°, ±4 cm)",
@@ -96,7 +96,7 @@ OFFSET_CONFIGS = {
     9:  (13.0, 0.03, 0.25, 0.38),
     10: (15.0, 0.03, 0.25, 0.38),
     11: (17.0, 0.03, 0.25, 0.38),
-    12: (19.0, 0.04, 0.25, 0.38),
+    12: (19.0, 0.03, 0.25, 0.38),
     
     # Ultra micro-steps
     13: (20.0, 0.04, 0.25, 0.38),

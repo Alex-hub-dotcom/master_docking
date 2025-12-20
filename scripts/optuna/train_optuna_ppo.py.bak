@@ -315,7 +315,7 @@ def ppo_update(policy, optimizer, obs_rgb, obs_privileged, actions, old_log_prob
     p_losses, v_losses, entropies = [], [], []
     
     for _ in range(epochs):
-        indices = torch.randperm(total, device=device)
+        indices = torch.randperm(total) 
         
         for start in range(0, total, batch_size):
             end = min(start + batch_size, total)

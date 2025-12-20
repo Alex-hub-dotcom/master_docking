@@ -54,8 +54,8 @@ from isaaclab.app import AppLauncher
 
 OPTUNA_CONFIG = {
     # Study settings
-    "study_name": "teko_ppo_optimization_v1",
-    "storage_path": "/home/schux00/optuna/teko_study.db",
+    "study_name": "teko_ppo_nsgaii_v1",
+    "storage_path": "/home/schux00/optuna/teko_nsgaii.db",
     
     # Optimization target
     "direction": "maximize",  # Maximize SSR
@@ -315,7 +315,7 @@ def ppo_update(policy, optimizer, obs_rgb, obs_privileged, actions, old_log_prob
     p_losses, v_losses, entropies = [], [], []
     
     for _ in range(epochs):
-        indices = torch.randperm(total, device=device)
+        indices = torch.randperm(total) 
         
         for start in range(0, total, batch_size):
             end = min(start + batch_size, total)
@@ -364,6 +364,205 @@ def ppo_update(policy, optimizer, obs_rgb, obs_privileged, actions, old_log_prob
 # =============================================================================
 # OPTUNA OBJECTIVE FUNCTION
 # =============================================================================
+
+def objective_with_env(trial: optuna.Trial, env) -> float:
+    """
+    Optuna objective with shared environment - avoids Isaac Sim restart issues.
+    """
+    
+    # Sample hyperparameters
+    entropy_coef = trial.suggest_float("entropy_coef", 0.0, 0.01)
+    gae_lambda = trial.suggest_float("gae_lambda", 0.9, 1.0)
+    clip_ratio = trial.suggest_categorical("clip_ratio", [0.1, 0.2, 0.3])
+    epochs = trial.suggest_int("epochs", 3, 30)
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [1024, 2048, 4096])
+    
+    print(f"\n{'='*70}")
+    print(f"TRIAL {trial.number}")
+    print(f"{'='*70}")
+    print(f"entropy_coef: {entropy_coef:.6f}")
+    print(f"gae_lambda:   {gae_lambda:.4f}")
+    print(f"clip_ratio:   {clip_ratio}")
+    print(f"epochs:       {epochs}")
+    print(f"learning_rate: {learning_rate:.2e}")
+    print(f"batch_size:   {batch_size}")
+    print(f"{'='*70}\n")
+    
+    device = torch.device("cuda:0")
+    
+    # Reset environment to stage 0
+    env.set_curriculum_level(0)
+    
+    # Create fresh policy for this trial
+    policy = AsymmetricPolicy(
+        vision_channels=4,
+        privileged_dim=7,
+        action_dim=2,
+        hidden_dim=256,
+    ).to(device)
+    
+    optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
+    
+    # Training loop
+    step = 0
+    max_steps = OPTUNA_CONFIG["max_steps_per_trial"]
+    eval_interval = OPTUNA_CONFIG["eval_interval"]
+    rollout_len = FIXED_PARAMS["rollout_len"]
+    num_envs = FIXED_PARAMS["num_envs"]
+    
+    ep_rewards = deque(maxlen=100)
+    stage_successes = deque(maxlen=200)
+    
+    cur_reward = torch.zeros(num_envs, device=device)
+    cur_length = torch.zeros(num_envs, dtype=torch.int32, device=device)
+    
+    obs_dict, _ = env.reset()
+    best_ssr = 0.0
+    current_stage = 0
+    next_eval = eval_interval
+    
+    try:
+        while step < max_steps:
+            # Collect rollout
+            obs_rgb_buf, obs_priv_buf = [], []
+            act_buf, rew_buf, val_buf, logp_buf, done_buf = [], [], [], [], []
+            
+            for _ in range(rollout_len):
+                obs = {"rgb": obs_dict["rgb"].to(device)}
+                if "privileged" in obs_dict:
+                    obs["privileged"] = obs_dict["privileged"].to(device)
+                
+                with torch.no_grad():
+                    action, log_prob, value = policy.act(obs)
+                
+                obs_dict, reward, term, trunc, _ = env.step(action)
+                done = term | trunc
+                
+                cur_reward += reward
+                cur_length += 1
+                
+                for i in range(num_envs):
+                    if done[i]:
+                        ep_rewards.append(cur_reward[i].item())
+                        success = reward[i].item() > 50.0
+                        stage_successes.append(1.0 if success else 0.0)
+                        cur_reward[i] = 0.0
+                        cur_length[i] = 0
+                
+                obs_rgb_buf.append(obs["rgb"].cpu())
+                if "privileged" in obs:
+                    obs_priv_buf.append(obs["privileged"].cpu())
+                act_buf.append(action.cpu())
+                rew_buf.append(reward.cpu())
+                val_buf.append(value.cpu())
+                logp_buf.append(log_prob.cpu())
+                done_buf.append(done.float().cpu())
+                
+                step += num_envs
+            
+            # Stack buffers
+            obs_rgb = torch.stack(obs_rgb_buf)
+            obs_priv = torch.stack(obs_priv_buf) if obs_priv_buf else None
+            actions = torch.stack(act_buf)
+            rewards = torch.stack(rew_buf)
+            values = torch.stack(val_buf)
+            log_probs = torch.stack(logp_buf)
+            dones = torch.stack(done_buf)
+            
+            # Compute GAE
+            with torch.no_grad():
+                adv, ret = compute_gae(
+                    rewards, values, dones,
+                    FIXED_PARAMS["gamma"], gae_lambda
+                )
+            
+            # PPO update
+            ppo_update(
+                policy, optimizer,
+                obs_rgb, obs_priv,
+                actions, log_probs,
+                adv, ret,
+                epochs=epochs,
+                batch_size=batch_size,
+                clip_ratio=clip_ratio,
+                value_clip=FIXED_PARAMS["value_clip"],
+                entropy_coef=entropy_coef,
+                value_coef=FIXED_PARAMS["value_coef"],
+                max_grad_norm=FIXED_PARAMS["max_grad_norm"],
+            )
+            
+            # Compute metrics
+            ssr = np.mean(stage_successes) if stage_successes else 0.0
+            mean_reward = np.mean(ep_rewards) if ep_rewards else 0.0
+            current_stage = env.curriculum_level
+            
+            if ssr > best_ssr:
+                best_ssr = ssr
+            
+            # Report to Optuna (fixed interval)
+            if step >= next_eval:
+                trial.report(ssr, step)
+                next_eval += eval_interval
+                
+                print(f"[{step:,}] Stage {current_stage} | SSR: {ssr:.1%} | "
+                      f"Reward: {mean_reward:.1f} | Best: {best_ssr:.1%}")
+                
+                # Check for pruning
+                if OPTUNA_CONFIG["pruning_enabled"] and trial.should_prune():
+                    print(f"Trial {trial.number} pruned at step {step:,}")
+                    raise optuna.TrialPruned()
+                
+                # Manual pruning based on stage progress
+                if step >= OPTUNA_CONFIG["pruning_warmup_steps"]:
+                    if current_stage == 0 and ssr < OPTUNA_CONFIG["min_ssr_stage0"]:
+                        print(f"Trial {trial.number} pruned: SSR {ssr:.1%} < {OPTUNA_CONFIG['min_ssr_stage0']:.0%} at S0")
+                        raise optuna.TrialPruned()
+                    
+                    if step >= 200_000:
+                        if current_stage <= 3 and ssr < OPTUNA_CONFIG["min_ssr_stage3"]:
+                            print(f"Trial {trial.number} pruned: stuck at S{current_stage}")
+                            raise optuna.TrialPruned()
+                    
+                    if step >= 500_000:
+                        if current_stage <= 5 and ssr < OPTUNA_CONFIG["min_ssr_stage5"]:
+                            print(f"Trial {trial.number} pruned: stuck at S{current_stage}")
+                            raise optuna.TrialPruned()
+            
+            # Curriculum advancement
+            if len(stage_successes) >= 50 and ssr >= 0.70:
+                if current_stage < 27:
+                    env.set_curriculum_level(current_stage + 1)
+                    obs_dict, _ = env.reset()
+                    cur_reward.zero_()
+                    cur_length.zero_()
+                    stage_successes.clear()
+                    print(f"➡️ Advanced to S{current_stage + 1}")
+        
+        # Training complete
+        print(f"\nTRIAL {trial.number} COMPLETE")
+        print(f"Final SSR: {best_ssr:.1%}")
+        print(f"Final Stage: S{current_stage}")
+        
+    except optuna.TrialPruned:
+        # Reset env to clean state for next trial
+        env.set_curriculum_level(0)
+        env.reset()
+        raise
+    
+    except Exception as e:
+        print(f"Trial {trial.number} failed with error: {e}")
+        env.set_curriculum_level(0)
+        env.reset()
+        raise optuna.TrialPruned()
+    
+    # Reset for next trial
+    env.set_curriculum_level(0)
+    
+    # Return combined metric
+    score = best_ssr + (current_stage * 0.01)
+    return score
+
 
 def objective(trial: optuna.Trial, args) -> float:
     """
@@ -602,6 +801,7 @@ def create_study():
         storage=storage,
         direction=OPTUNA_CONFIG["direction"],
         load_if_exists=True,
+        sampler=optuna.samplers.NSGAIISampler(),
         pruner=optuna.pruners.MedianPruner(
             n_startup_trials=3,
             n_warmup_steps=100_000,
@@ -617,10 +817,25 @@ def create_study():
 
 
 def run_worker(args):
-    """Run Optuna worker."""
+    """Run Optuna worker with shared environment."""
     # Initialize Isaac Sim
     app = AppLauncher(args)
     sim = app.app
+    
+    # Create environment ONCE
+    import sys
+    sys.path.insert(0, "/workspace/teko/source/teko")
+    from teko.tasks.direct.teko.teko_env import TekoEnv
+    from teko.tasks.direct.teko.teko_env_cfg import TekoEnvCfg
+    
+    cfg = TekoEnvCfg()
+    cfg.scene.num_envs = FIXED_PARAMS["num_envs"]
+    cfg.enable_curriculum = True
+    cfg.asymmetric_critic = True
+    
+    print("Creating shared environment...")
+    env = TekoEnv(cfg=cfg)
+    print(f"✅ Shared environment created with {FIXED_PARAMS['num_envs']} envs")
     
     try:
         storage = f"sqlite:///{OPTUNA_CONFIG['storage_path']}"
@@ -634,9 +849,9 @@ def run_worker(args):
         print(f"   Completed trials: {len([t for t in study.trials if t.state == TrialState.COMPLETE])}")
         print(f"   Running trials: {len([t for t in study.trials if t.state == TrialState.RUNNING])}")
         
-        # Run optimization
+        # Run optimization with shared env
         study.optimize(
-            lambda trial: objective(trial, args),
+            lambda trial: objective_with_env(trial, env),
             n_trials=OPTUNA_CONFIG["n_trials"],
             timeout=None,
             catch=(Exception,),
@@ -653,6 +868,7 @@ def run_worker(args):
             print(f"  {k}: {v}")
         
     finally:
+        env.close()
         sim.close()
 
 

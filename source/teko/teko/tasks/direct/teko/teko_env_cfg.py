@@ -122,8 +122,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
         ),
         data_types=["rgb"],
         spawn=None,  # <-- CHANGE THIS: Don't spawn, camera already exists in URDF
-        width=84,
-        height=84,
+        width=128,
+        height=128,
     )
 
     # ------------------------------------------------------------------
@@ -148,6 +148,6 @@ class TekoEnvCfg(DirectRLEnvCfg):
 
     # Frame-stacked grayscale: [num_frame_stack, H, W]
     observation_space = {
-        "rgb": (4, 84, 84),          # 4-frame stack of grayscale
+        "rgb": (4, 128, 128),          # 4-frame stack of grayscale
         "privileged": (7,),          # [dx, dy, dz, yaw_err, vx, vy, w]
     }
