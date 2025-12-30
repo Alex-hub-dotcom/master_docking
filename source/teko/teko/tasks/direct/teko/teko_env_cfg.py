@@ -76,7 +76,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # Scene - INCREASED num_envs for TiledCamera efficiency
     # ------------------------------------------------------------------
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=256,  # TiledCamera allows many more envs
+        num_envs=120,  # TiledCamera allows many more envs
         env_spacing=6.0,
         replicate_physics=True,
     )

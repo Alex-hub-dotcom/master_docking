@@ -1,28 +1,31 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment - TiledCamera + Frame Stacking (v9.1 - FIXED SPHERE OFFSET)
-=============================================================================
-- TiledCamera for efficient parallel rendering (single GPU pass)
+TEKO Environment - TiledCamera + Frame Stacking (v9.3 - SUCCESS FLAG FIX)
+=========================================================================
+Key features:
+- TiledCamera for efficient batched rendering (single GPU pass)
 - 84x84 grayscale observations with 4-frame stacking
 - Supports multi-stage curriculum (28 stages)
 - Asymmetric actor-critic (vision + privileged state)
-- Optimized for 256-512+ parallel environments
+- Optimized for many parallel environments
 
-FIXED in v9.1:
-- Female sphere offset now correctly rotated by robot orientation
+CRITICAL FIX (v9.3):
+- Added _last_success tracking in _get_dones() BEFORE reset happens
+- This fixes SSR calculation which was broken (3-7% instead of 80%+)
 
 Author: Alexandre Schleier Neves da Silva
 """
 
 from __future__ import annotations
-import math
+
 import numpy as np
 import torch
+
 from omni.usd import get_context
 from pxr import Sdf, UsdGeom, UsdLux, Gf, UsdPhysics
+
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sim import SimulationContext
 from isaaclab.sensors import TiledCamera
 
 from .teko_env_cfg import TekoEnvCfg
@@ -38,23 +41,25 @@ from .robots.teko_static import TEKOStatic
 class TekoEnv(DirectRLEnv):
     """
     Torque-driven TEKO environment with TiledCamera and curriculum learning.
-    v9.1: Fixed sphere offset rotation
     """
 
     cfg: TekoEnvCfg
 
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
         # Camera resolution from TiledCamera config
-        self._cam_width = cfg.tiled_camera.width
-        self._cam_height = cfg.tiled_camera.height
+        self._cam_width = int(cfg.tiled_camera.width)
+        self._cam_height = int(cfg.tiled_camera.height)
+
+        # Keep a local dt for sensor updates (robust across Isaac Lab versions)
+        self._dt = float(cfg.sim.dt)
 
         # Frame stacking configuration
-        self.num_frame_stack = cfg.num_frame_stack
-        self.frame_stack = None
-        self.frame_counts = None
+        self.num_frame_stack = int(cfg.num_frame_stack)
+        self.frame_stack: torch.Tensor | None = None
+        self.frame_counts: torch.Tensor | None = None
 
         # Torque scaling
-        self._max_wheel_torque = cfg.max_wheel_torque
+        self._max_wheel_torque = float(cfg.max_wheel_torque)
 
         # Arena limits
         self._arena_half_x = float(cfg.arena_half_x)
@@ -67,21 +72,25 @@ class TekoEnv(DirectRLEnv):
         self._static_body_width = float(cfg.static_body_width)
 
         # Placeholders
-        self.actions = None
-        self.dof_idx = None
-        self.tiled_camera = None
-        self.goal_positions = None
+        self.actions: torch.Tensor | None = None
+        self.dof_idx: torch.Tensor | None = None
+        self.tiled_camera: TiledCamera | None = None
+        self.goal_positions: torch.Tensor | None = None
         self.num_agents = 1
-        self._polarity = None
+        self._polarity: torch.Tensor | None = None
 
         # Curriculum
         self.curriculum_level = 0
 
         # State tracking
-        self.prev_robot_pos = None
-        self.prev_distance = None
-        self.prev_actions = None
-        self.step_count = None
+        self.prev_distance: torch.Tensor | None = None
+        self.prev_actions: torch.Tensor | None = None
+        self.step_count: torch.Tensor | None = None
+
+        # ============================================================
+        # CRITICAL: Success flag tracking (must be set BEFORE reset)
+        # ============================================================
+        self._last_success: torch.Tensor | None = None
 
         # Episode stats
         self.episode_rewards = []
@@ -104,11 +113,10 @@ class TekoEnv(DirectRLEnv):
     # OBSERVATION SPACE
     # ================================================================
     def _init_observation_space(self):
-        """Define the observation space (a stack of K grayscale frames)."""
+        """Define the observation space (stack of K grayscale frames)."""
         import gymnasium as gym
 
-        num_channels = self.num_frame_stack
-        frame_shape = (num_channels, self._cam_height, self._cam_width)
+        frame_shape = (self.num_frame_stack, self._cam_height, self._cam_width)
 
         obs_dict = {
             "rgb": gym.spaces.Box(
@@ -120,7 +128,7 @@ class TekoEnv(DirectRLEnv):
         }
 
         # Add privileged state if asymmetric critic enabled
-        if getattr(self.cfg, 'asymmetric_critic', False):
+        if getattr(self.cfg, "asymmetric_critic", False):
             obs_dict["privileged"] = gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
@@ -133,8 +141,8 @@ class TekoEnv(DirectRLEnv):
             f"[INFO] Observation space: rgb={frame_shape} "
             f"(K={self.num_frame_stack} grayscale frames), range [0, 1]"
         )
-        if getattr(self.cfg, 'asymmetric_critic', False):
-            print(f"[INFO] Privileged state: (7,) [dx, dy, dz, yaw_err, vx, vy, w]")
+        if getattr(self.cfg, "asymmetric_critic", False):
+            print("[INFO] Privileged state: (7,) [dx, dy, dz, yaw_err, vx, vy, w]")
 
     # ================================================================
     # Scene setup
@@ -159,7 +167,7 @@ class TekoEnv(DirectRLEnv):
         # Arena, goal robot, ground plane
         self._setup_per_environment_assets(stage)
 
-        # TiledCamera (single instance for ALL environments)
+        # TiledCamera (single instance for all environments)
         self._setup_tiled_camera()
 
         # Cache static robot positions
@@ -203,21 +211,24 @@ class TekoEnv(DirectRLEnv):
         UsdGeom.Gprim(cube).CreateDisplayColorAttr([Gf.Vec3f(0.4, 0.4, 0.4)])
 
     def _setup_per_environment_assets(self, stage):
-        """Setup arena, ground, robots for each environment."""
-        num_envs = self.scene.cfg.num_envs
-        ARENA_USD_PATH = "/workspace/teko/documents/CAD/USD/stage_arena.usd"
+        """Setup arena, ground, and static goal robot for each environment."""
+        num_envs = int(self.scene.cfg.num_envs)
+        arena_usd = "/workspace/teko/documents/CAD/USD/stage_arena.usd"
 
         for env_idx in range(num_envs):
             env_path = f"/World/envs/env_{env_idx}"
 
+            # Arena
             try:
                 arena_prim = stage.DefinePrim(f"{env_path}/Arena", "Xform")
-                arena_prim.GetReferences().AddReference(ARENA_USD_PATH)
+                arena_prim.GetReferences().AddReference(arena_usd)
             except Exception as e:
                 print(f"[WARN] Arena failed for env_{env_idx}: {e}")
 
+            # Ground
             self._spawn_ground_plane(stage, env_idx)
 
+            # Optional: enforce consistent starting transform for the active robot prim if it exists
             robot_prim = stage.GetPrimAtPath(f"{env_path}/Robot")
             if robot_prim.IsValid():
                 xf_robot = UsdGeom.Xformable(robot_prim)
@@ -225,6 +236,7 @@ class TekoEnv(DirectRLEnv):
                 xf_robot.AddTranslateOp().Set(Gf.Vec3d(0.3, 0.0, 0.4))
                 xf_robot.AddRotateZOp().Set(180.0)
 
+            # Static goal robot
             try:
                 TEKOStatic(prim_path=f"{env_path}/RobotGoal")
                 if env_idx % 50 == 0:
@@ -232,86 +244,29 @@ class TekoEnv(DirectRLEnv):
             except Exception as e:
                 print(f"[WARN] Failed to create static TEKO goal in env_{env_idx}: {e}")
 
-            if getattr(self.cfg, "debug_boundaries", False):
-                self._spawn_arena_boundaries(stage, env_idx)
-            if getattr(self.cfg, "debug_robot_boxes", False):
-                self._spawn_robot_debug_boxes(stage, env_idx)
-
         print(f"[INFO] Created {num_envs} environments.")
 
     def _setup_tiled_camera(self):
         """Setup TiledCamera for efficient batched rendering."""
         self.tiled_camera = TiledCamera(self.cfg.tiled_camera)
         self.scene.sensors["tiled_camera"] = self.tiled_camera
-        
+
         print(
-            f"[INFO] TiledCamera initialized: "
-            f"{self.scene.cfg.num_envs} cameras @ {self._cam_width}x{self._cam_height} "
-            f"(single batched render pass)"
+            "[INFO] TiledCamera initialized: "
+            f"{int(self.scene.cfg.num_envs)} cameras @ {self._cam_width}x{self._cam_height} "
+            "(single batched render pass)"
         )
 
     def _cache_goal_transforms(self):
-        """Precompute goal positions."""
-        num_envs = self.scene.cfg.num_envs
+        """Precompute goal positions (world frame)."""
+        num_envs = int(self.scene.cfg.num_envs)
         self.goal_positions = torch.zeros((num_envs, 3), device=self.device)
+
         for env_idx, origin in enumerate(self.scene.env_origins):
             local_goal = torch.tensor([1.0, 0.0, 0.40], device=self.device)
             self.goal_positions[env_idx] = origin + local_goal
+
         print(f"[INFO] Cached {num_envs} goal positions.")
-
-    # ------------------------------------------------------------------
-    # Debug visualization
-    # ------------------------------------------------------------------
-    def _spawn_arena_boundaries(self, stage, env_idx: int):
-        """Draw thin red walls at arena limits."""
-        env_path = f"/World/envs/env_{env_idx}/Debug"
-        stage.DefinePrim(env_path, "Xform")
-
-        hx = float(self._arena_half_x)
-        hy = float(self._arena_half_y)
-
-        def make_wall(name: str, pos, scale):
-            prim_path = f"{env_path}/{name}"
-            cube = UsdGeom.Cube.Define(stage, Sdf.Path(prim_path))
-            xf = UsdGeom.Xformable(cube)
-            xf.ClearXformOpOrder()
-            xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
-            xf.AddScaleOp().Set(Gf.Vec3d(*scale))
-            UsdGeom.Gprim(cube).CreateDisplayColorAttr([Gf.Vec3f(1.0, 0.0, 0.0)])
-
-        z = 0.4
-        make_wall("Boundary_Xmin", pos=(-hx, 0.0, z), scale=(0.02, 2.0 * hy, 0.01))
-        make_wall("Boundary_Xmax", pos=(hx, 0.0, z), scale=(0.02, 2.0 * hy, 0.01))
-        make_wall("Boundary_Ymin", pos=(0.0, -hy, z), scale=(2.0 * hx, 0.02, 0.01))
-        make_wall("Boundary_Ymax", pos=(0.0, hy, z), scale=(2.0 * hx, 0.02, 0.01))
-
-    def _spawn_robot_debug_boxes(self, stage, env_idx: int):
-        """Attach debug boxes to robot bodies."""
-        env_root = f"/World/envs/env_{env_idx}"
-        active_root = f"{env_root}/Robot/teko_urdf/TEKO_Body"
-        static_root = f"{env_root}/RobotGoal/teko_urdf/TEKO_Body"
-
-        self._make_debug_box(
-            stage, active_root, "DebugChassisActive",
-            self._active_body_length, self._active_body_width,
-            Gf.Vec3f(0.0, 1.0, 0.0)
-        )
-        self._make_debug_box(
-            stage, static_root, "DebugChassisStatic",
-            self._static_body_length, self._static_body_width,
-            Gf.Vec3f(1.0, 0.0, 0.0)
-        )
-
-    def _make_debug_box(self, stage, parent_path: str, name: str, 
-                        length: float, width: float, color: Gf.Vec3f):
-        """Helper for debug box creation."""
-        box_path = f"{parent_path}/{name}"
-        cube = UsdGeom.Cube.Define(stage, Sdf.Path(box_path))
-        xf = UsdGeom.Xformable(cube)
-        xf.ClearXformOpOrder()
-        xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.05))
-        xf.AddScaleOp().Set(Gf.Vec3d(0.5 * length, 0.5 * width, 0.01))
-        UsdGeom.Gprim(cube).CreateDisplayColorAttr([color])
 
     # ------------------------------------------------------------------
     # Quaternion rotation helper
@@ -322,26 +277,18 @@ class TekoEnv(DirectRLEnv):
 
         Args:
             vec: [3] local offset vector OR [N,3]
-            quat: [N,4] quaternions in (w, x, y, z) format  <-- Isaac Lab convention
+            quat: [N,4] quaternions in (w, x, y, z) format (Isaac Lab convention)
 
         Returns:
             [N,3] rotated vectors in world frame
         """
         num_envs = quat.shape[0]
 
-        # Expand vec to match batch size
         if vec.dim() == 1:
             vec = vec.unsqueeze(0).expand(num_envs, 3)
 
-        # Isaac Lab: quat = (w, x, y, z)
-        qw = quat[:, 0]
-        qx = quat[:, 1]
-        qy = quat[:, 2]
-        qz = quat[:, 3]
-
-        vx = vec[:, 0]
-        vy = vec[:, 1]
-        vz = vec[:, 2]
+        qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+        vx, vy, vz = vec[:, 0], vec[:, 1], vec[:, 2]
 
         # t = 2 * cross(q.xyz, v)
         tx = 2.0 * (qy * vz - qz * vy)
@@ -356,43 +303,41 @@ class TekoEnv(DirectRLEnv):
         return torch.stack([rx, ry, rz], dim=-1)
 
     # ------------------------------------------------------------------
-    # Sphere distance computation (FIXED)
+    # Sphere distance computation
     # ------------------------------------------------------------------
     def get_sphere_distances_from_physics(self):
         """
         Compute distance between male/female connector spheres.
-        
-        FIXED: Female offset is now properly rotated by robot orientation.
+
+        Female offset is rotated by the active robot orientation.
         """
-        # Female connector offset in ROBOT LOCAL coordinates
-        # TEKO body frame: +X aponta para a TRASEIRA (rear), -X para a FRENTE (front)
-        FEMALE_OFFSET_LOCAL = torch.tensor([-0.24, 0.0, -0.08], device=self.device)
-        
-        # Male connector offset - goal robot doesn't rotate, so this is already world-aligned
-        MALE_OFFSET = torch.tensor([0.22667, -0.00144, -0.08815], device=self.device)
+        if self.goal_positions is None:
+            raise RuntimeError("Goal positions not cached yet.")
 
-        # Get robot state
-        active_pos = self.robot.data.root_pos_w      # [N, 3]
-        active_quat = self.robot.data.root_quat_w    # [N,4] in (w, x, y, z)
-        static_pos = self.goal_positions             # [N, 3]
+        # Female connector offset in robot LOCAL frame
+        female_offset_local = torch.tensor([-0.24, 0.0, -0.08], device=self.device)
 
-        # Rotate female offset by robot orientation to get world offset
-        female_offset_world = self._rotate_vector_by_quat(FEMALE_OFFSET_LOCAL, active_quat)
-        
-        # Compute world positions of spheres
+        # Male connector offset for the static goal robot (goal does not rotate)
+        male_offset = torch.tensor([0.22667, -0.00144, -0.08815], device=self.device)
+
+        active_pos = self.robot.data.root_pos_w           # [N, 3]
+        active_quat = self.robot.data.root_quat_w         # [N, 4] (w,x,y,z)
+        static_pos = self.goal_positions                  # [N, 3]
+
+        female_offset_world = self._rotate_vector_by_quat(female_offset_local, active_quat)
+
         female_pos = active_pos + female_offset_world
-        male_pos = static_pos + MALE_OFFSET.unsqueeze(0).expand(static_pos.shape[0], 3)
+        male_pos = static_pos + male_offset.unsqueeze(0).expand(static_pos.shape[0], 3)
 
-        # Compute distances
         diff = female_pos - male_pos
         dist_3d = torch.norm(diff, dim=-1)
         dist_xy = torch.norm(diff[:, :2], dim=-1)
 
         # Surface-to-surface distance (accounting for sphere radii)
-        R_FEMALE = 0.005
-        R_MALE = 0.005
-        surface_3d = torch.clamp(dist_3d - (R_FEMALE + R_MALE), min=0.0)
-        surface_xy = torch.clamp(dist_xy - (R_FEMALE + R_MALE), min=0.0)
+        r_female = 0.005
+        r_male = 0.005
+        surface_3d = torch.clamp(dist_3d - (r_female + r_male), min=0.0)
+        surface_xy = torch.clamp(dist_xy - (r_female + r_male), min=0.0)
 
         return female_pos, male_pos, surface_xy, surface_3d
 
@@ -407,15 +352,13 @@ class TekoEnv(DirectRLEnv):
         name_to_idx = {n: i for i, n in enumerate(self.robot.joint_names)}
         indices = [name_to_idx[n] for n in self.cfg.dof_names if n in name_to_idx]
         if not indices:
-            raise RuntimeError(f"No valid DOF names found: {self.robot.joint_names}")
-        
+            raise RuntimeError(f"No valid DOF names found. Robot joints: {self.robot.joint_names}")
+
         self.dof_idx = torch.tensor(indices, dtype=torch.long, device=self.device)
-        print(f"[INFO] DOF indices: {self.dof_idx}")
+        print(f"[INFO] DOF indices: {self.dof_idx.tolist()}")
 
         if self._polarity is None:
-            self._polarity = torch.tensor(
-                self.cfg.wheel_polarity, device=self.device
-            ).unsqueeze(0)
+            self._polarity = torch.tensor(self.cfg.wheel_polarity, device=self.device).unsqueeze(0)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions = actions
@@ -426,68 +369,90 @@ class TekoEnv(DirectRLEnv):
         if self.dof_idx is None or self.actions is None:
             return
 
-        num_envs = self.scene.cfg.num_envs
+        num_envs = int(self.scene.cfg.num_envs)
         v_cmd = self.actions[:, 0]
         w_cmd = self.actions[:, 1]
 
-        v = v_cmd * 1.0
-        w = w_cmd * 1.0
+        # Clamp incoming commands defensively (env saturation should match policy)
+        v_cmd = torch.clamp(v_cmd, -1.0, 1.0)
+        w_cmd = torch.clamp(w_cmd, -1.0, 1.0)
 
+        # Simple differential drive mixing
         k = 0.5
-        left = torch.clamp(v - k * w, -1.0, 1.0)
-        right = torch.clamp(v + k * w, -1.0, 1.0)
+        left = torch.clamp(v_cmd - k * w_cmd, -1.0, 1.0)
+        right = torch.clamp(v_cmd + k * w_cmd, -1.0, 1.0)
 
-        torque_targets = (
-            torch.stack([left, right, left, right], dim=1) * self._max_wheel_torque
-        )
+        torque_targets = torch.stack([left, right, left, right], dim=1) * self._max_wheel_torque
         torque_targets = torque_targets * self._polarity
 
         env_ids = torch.arange(num_envs, device=self.device)
-        self.robot.set_joint_effort_target(
-            torque_targets, env_ids=env_ids, joint_ids=self.dof_idx
-        )
+        self.robot.set_joint_effort_target(torque_targets, env_ids=env_ids, joint_ids=self.dof_idx)
 
     # ------------------------------------------------------------------
     # Observations (TiledCamera + Frame Stacking)
     # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
         """
-        Capture RGB from TiledCamera + privileged state for asymmetric critic.
+        Capture grayscale frames from TiledCamera and build a K-frame stack.
         """
-        num_envs = self.scene.cfg.num_envs
+        if self.tiled_camera is None:
+            raise RuntimeError("TiledCamera not initialized.")
+        if self.goal_positions is None:
+            raise RuntimeError("Goal positions not cached yet.")
+
+        num_envs = int(self.scene.cfg.num_envs)
         h, w = self._cam_height, self._cam_width
 
-        # Initialize frame stack with FP16 for memory efficiency
+        # Ensure the sensor refreshes its buffers on this step (prevents stale/empty frames)
+        try:
+            self.tiled_camera.update(dt=self._dt)
+        except TypeError:
+            # Some versions expose update() without dt
+            self.tiled_camera.update()
+
+        # Allocate frame buffers once
         if self.frame_stack is None:
             self.frame_stack = torch.zeros(
                 (num_envs, self.num_frame_stack, h, w),
-                device=self.device, dtype=torch.float16,
+                device=self.device,
+                dtype=torch.float16,
             )
         if self.frame_counts is None:
-            self.frame_counts = torch.zeros(
-                num_envs, device=self.device, dtype=torch.int32
-            )
+            self.frame_counts = torch.zeros(num_envs, device=self.device, dtype=torch.int32)
 
-        # TiledCamera: Get ALL images in ONE call
-        rgb_data = self.tiled_camera.data.output["rgb"]
+        # Read camera output
+        rgb_data = self.tiled_camera.data.output.get("rgb", None)
 
-        if rgb_data is not None and rgb_data.numel() > 0:
+        # Build current grayscale frame (float16 in [0,1])
+        if rgb_data is None or rgb_data.numel() == 0:
+            gray_current = torch.zeros((num_envs, h, w), device=self.device, dtype=torch.float16)
+        else:
+            # Expected shapes:
+            # - [N, H, W, 4] uint8 (RGBA)
+            # - [N, H, W, 3] uint8 (RGB)
+            # - Sometimes float already in [0,1]
             if rgb_data.shape[-1] == 4:
                 rgb_data = rgb_data[..., :3]
-            
-            rgb = rgb_data.float() / 255.0
-            
-            gray_current = (
-                0.299 * rgb[..., 0] + 
-                0.587 * rgb[..., 1] + 
-                0.114 * rgb[..., 2]
-            ).half()
-        else:
-            gray_current = torch.zeros(
-                (num_envs, h, w), device=self.device, dtype=torch.float16
-            )
 
-        # Frame stacking logic
+            rgb = rgb_data
+
+            if rgb.dtype in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+                rgb = rgb.float() / 255.0
+            else:
+                rgb = rgb.float()
+
+            # Convert RGB -> grayscale
+            gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+            gray_current = torch.clamp(gray, 0.0, 1.0).to(torch.float16)
+
+            # Defensive: if N mismatch, pad/trim (rare, but prevents crashes)
+            if gray_current.shape[0] != num_envs:
+                n = min(gray_current.shape[0], num_envs)
+                tmp = torch.zeros((num_envs, h, w), device=self.device, dtype=torch.float16)
+                tmp[:n] = gray_current[:n]
+                gray_current = tmp
+
+        # Frame stacking
         reset_mask = self.frame_counts == 0
         if reset_mask.any():
             idx = reset_mask.nonzero(as_tuple=False).squeeze(-1)
@@ -497,56 +462,52 @@ class TekoEnv(DirectRLEnv):
         non_reset_mask = ~reset_mask
         if non_reset_mask.any():
             idx = non_reset_mask.nonzero(as_tuple=False).squeeze(-1)
-            self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
-            self.frame_stack[idx, -1] = gray_current[idx]
+            # In-place shift to avoid extra allocations
+            self.frame_stack[idx, :-1].copy_(self.frame_stack[idx, 1:])
+            self.frame_stack[idx, -1].copy_(gray_current[idx])
 
-        stacked = self.frame_stack.float()
+        stacked = self.frame_stack.float()  # return float32 to the agent
 
-        # Add privileged state if asymmetric critic enabled
-        if getattr(self.cfg, 'asymmetric_critic', False):
+        # Privileged state for asymmetric critic
+        if getattr(self.cfg, "asymmetric_critic", False):
             robot_pos = self.robot.data.root_pos_w
             goal_pos = self.goal_positions
             robot_quat = self.robot.data.root_quat_w
             robot_vel = self.robot.data.root_lin_vel_w
             robot_angvel = self.robot.data.root_ang_vel_w
-            
+
             diff = goal_pos - robot_pos
             dx, dy, dz = diff[:, 0], diff[:, 1], diff[:, 2]
-            
+
             robot_yaw = self._extract_yaw(robot_quat)
             vec_to_goal = goal_pos - robot_pos
             goal_yaw = torch.atan2(vec_to_goal[:, 1], vec_to_goal[:, 0])
+
+            # Rear-facing yaw (robot is docking with its rear)
             rear_yaw = robot_yaw + torch.pi
-            yaw_error = torch.atan2(
-                torch.sin(rear_yaw - goal_yaw),
-                torch.cos(rear_yaw - goal_yaw)
+            yaw_error = torch.atan2(torch.sin(rear_yaw - goal_yaw), torch.cos(rear_yaw - goal_yaw))
+
+            privileged = torch.stack(
+                [dx, dy, dz, yaw_error, robot_vel[:, 0], robot_vel[:, 1], robot_angvel[:, 2]],
+                dim=-1,
             )
-            
-            privileged = torch.stack([
-                dx, dy, dz, yaw_error,
-                robot_vel[:, 0], robot_vel[:, 1], robot_angvel[:, 2]
-            ], dim=-1)
-            
-            return {
-                "rgb": stacked,
-                "privileged": privileged,
-            }
-        else:
-            return {"rgb": stacked}
+
+            return {"rgb": stacked, "privileged": privileged}
+
+        return {"rgb": stacked}
 
     def _extract_yaw(self, quat: torch.Tensor) -> torch.Tensor:
-        """Extract yaw angle from quaternion (w, x, y, z)."""
+        """Extract yaw from quaternion (w, x, y, z)."""
         qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         siny_cosp = 2.0 * (qw * qz + qx * qy)
         cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
         return torch.atan2(siny_cosp, cosy_cosp)
 
-
     # ------------------------------------------------------------------
     # Rewards
     # ------------------------------------------------------------------
     def _get_rewards(self):
-        """Delegate to reward function."""
+        """Delegate reward computation to the reward module."""
         return compute_total_reward(self)
 
     # ------------------------------------------------------------------
@@ -562,6 +523,17 @@ class TekoEnv(DirectRLEnv):
         raw_success = surface_xy < 0.03
         success = raw_success & (self.episode_length_buf >= min_success_steps)
 
+        # ============================================================
+        # CRITICAL FIX: Store success flags BEFORE reset happens
+        # This allows train_optuna_v3.py to read correct success status
+        # ============================================================
+        if self._last_success is None:
+            self._last_success = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+        self._last_success.copy_(success)
+
+        # Out-of-bounds based on arena limits in local env coordinates
         robot_pos_global = self.robot.data.root_pos_w
         env_origins = self.scene.env_origins
         robot_pos_local = robot_pos_global - env_origins
@@ -569,11 +541,9 @@ class TekoEnv(DirectRLEnv):
         hx = float(self._arena_half_x)
         hy = float(self._arena_half_y)
 
-        out_of_bounds = (
-            (robot_pos_local[:, 0].abs() > hx) |
-            (robot_pos_local[:, 1].abs() > hy)
-        )
+        out_of_bounds = (robot_pos_local[:, 0].abs() > hx) | (robot_pos_local[:, 1].abs() > hy)
 
+        # Collision proxy: AABB overlap + high speed + not already successful
         lin_vel = self.robot.data.root_lin_vel_w
         speed = torch.norm(lin_vel[:, :2], dim=-1)
 
@@ -587,16 +557,13 @@ class TekoEnv(DirectRLEnv):
         active_half_len = 0.5 * self._active_body_length
         active_half_wid = 0.5 * self._active_body_width
 
-        boxes_overlap = (
-            (dx.abs() < (static_half_len + active_half_len)) &
-            (dy.abs() < (static_half_wid + active_half_wid))
-        )
+        boxes_overlap = (dx.abs() < (static_half_len + active_half_len)) & (dy.abs() < (static_half_wid + active_half_wid))
 
         collision = (
-            boxes_overlap &
-            (speed > 0.4) &
-            ~raw_success &
-            (self.episode_length_buf >= min_collision_steps)
+            boxes_overlap
+            & (speed > 0.4)
+            & ~raw_success
+            & (self.episode_length_buf >= min_collision_steps)
         )
 
         terminated = success | out_of_bounds | collision
@@ -605,14 +572,28 @@ class TekoEnv(DirectRLEnv):
         return terminated, time_out
 
     # ------------------------------------------------------------------
+    # Public accessor for success flags (used by train_optuna_v3.py)
+    # ------------------------------------------------------------------
+    def get_last_success(self) -> torch.Tensor:
+        """
+        Return the success flags from the last _get_dones() call.
+        This is called by the training script AFTER step() but BEFORE
+        the environment state is read again.
+        """
+        if self._last_success is None:
+            # Fallback: return all False
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        return self._last_success
+
+    # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
     def _reset_idx(self, env_ids):
-        """Reset environments."""
+        """Reset selected environments."""
         super()._reset_idx(env_ids)
         self._lazy_init_articulation()
 
-        num_envs = self.scene.cfg.num_envs
+        num_envs = int(self.scene.cfg.num_envs)
         if self.prev_distance is None:
             self.prev_distance = torch.zeros(num_envs, device=self.device)
         if self.prev_actions is None:
@@ -623,14 +604,20 @@ class TekoEnv(DirectRLEnv):
         self.prev_actions[env_ids] = 0.0
         self.step_count[env_ids] = 0
 
+        # Force frame stack re-initialization for these envs
         if self.frame_counts is not None:
             self.frame_counts[env_ids] = 0
 
+        # Curriculum reset
         reset_environment_curriculum(self, env_ids)
 
+        # Cache starting distance (for progress reward etc.)
         _, _, surface_xy, _ = self.get_sphere_distances_from_physics()
         self.prev_distance[env_ids] = surface_xy[env_ids]
 
+    # ------------------------------------------------------------------
+    # Curriculum helpers
+    # ------------------------------------------------------------------
     def set_curriculum_level(self, level: int):
         """Set curriculum level."""
         set_curriculum_level(self, level)
