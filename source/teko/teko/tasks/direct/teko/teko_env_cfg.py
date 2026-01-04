@@ -104,8 +104,8 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # Actuation
     # ------------------------------------------------------------------
     action_scale = 1.0
-    max_wheel_torque = 1.2
-    wheel_polarity = [1.0, -1.0, 1.0, -1.0]
+    max_wheel_torque = 5.0
+    wheel_polarity = [-1.0, 1.0, -1.0, 1.0]
 
     # ------------------------------------------------------------------
     # TiledCamera Configuration (replaces per-env Camera)

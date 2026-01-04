@@ -64,7 +64,7 @@ TEKO_CONFIGURATION = ArticulationCfg(
     actuators={
         "wheel_actuators": ImplicitActuatorCfg(
             joint_names_expr=WHEEL_JOINTS,  # which joints this actuator controls
-            effort_limit_sim=1.0,           # max torque (kept low to reduce crazy jumps)
+            effort_limit_sim=3.0,           # max torque (kept low to reduce crazy jumps)
             stiffness=0.0,                  # 0 = pure torque control (no spring)
             damping=0.5,                    # how much the joint resists fast motion
             friction=0.1,                   # less joint friction → smoother rolling

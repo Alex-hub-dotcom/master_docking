@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment - Curriculum Compatible (v8.4 - GRAYSCALE 84x84)
-=================================================================
-- Supports multi-stage curriculum
-- Nuclear penalties (-500 collision/boundary)
-- Frame stacking: returns stacked grayscale frames [K, H, W]
-- Pure shaping + terminal rewards
+TEKO Environment with TiledCamera for Efficient Rendering
+==========================================================
+
+Uses TiledCamera instead of individual cameras for better GPU memory efficiency.
+Supports 150+ parallel environments on RTX 3090.
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -14,12 +13,13 @@ from __future__ import annotations
 import math
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omni.usd import get_context
 from pxr import Sdf, UsdGeom, UsdLux, Gf, UsdPhysics
+
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sim import SimulationContext
-from isaaclab.sensors import Camera, CameraCfg
+from isaaclab.sensors import TiledCamera, TiledCameraCfg
 
 from .teko_env_cfg import TekoEnvCfg
 from .rewards.reward_functions import compute_total_reward
@@ -31,10 +31,10 @@ from .utils.logging_utils import collect_episode_stats
 from .robots.teko_static import TEKOStatic
 
 
-class TekoEnv(DirectRLEnv):
+class TekoEnvTiled(DirectRLEnv):
     """
-    Torque-driven TEKO environment with curriculum learning.
-    v8.4: 84x84 grayscale observations
+    TEKO environment with TiledCamera for efficient batched rendering.
+    Supports 150+ parallel environments.
     """
 
     cfg: TekoEnvCfg
@@ -43,7 +43,7 @@ class TekoEnv(DirectRLEnv):
         # Camera resolution
         self._cam_res = (cfg.camera.width, cfg.camera.height)
 
-        # Frame stacking configuration
+        # Frame stacking
         self.num_frame_stack = getattr(cfg, "num_frame_stack", 4)
         self.frame_stack = None
         self.frame_counts = None
@@ -64,7 +64,7 @@ class TekoEnv(DirectRLEnv):
         # Placeholders
         self.actions = None
         self.dof_idx = None
-        self.cameras = []
+        self.tiled_camera = None  # TiledCamera instead of list
         self.goal_positions = None
         self.num_agents = 1
         self._polarity = None
@@ -77,6 +77,7 @@ class TekoEnv(DirectRLEnv):
         self.prev_distance = None
         self.prev_actions = None
         self.step_count = None
+        self._last_success = None
 
         # Episode stats
         self.episode_rewards = []
@@ -95,34 +96,23 @@ class TekoEnv(DirectRLEnv):
 
         super().__init__(cfg, render_mode, **kwargs)
 
-    # ================================================================
-    # OBSERVATION SPACE (FIXED INDENTATION)
-    # ================================================================
     def _init_observation_space(self):
-        """Define the observation space (a stack of K grayscale frames)."""
+        """Define observation space (stack of K grayscale frames)."""
         import gymnasium as gym
 
         num_channels = self.num_frame_stack
         frame_shape = (num_channels, self.cfg.camera.height, self.cfg.camera.width)
 
-        self.observation_space = gym.spaces.Dict(
-            {
-                "rgb": gym.spaces.Box(
-                    low=0.0,
-                    high=1.0,
-                    shape=frame_shape,
-                    dtype=np.float32,
-                )
-            }
-        )
-        print(
-            f"[INFO] Observation space set to {frame_shape} "
-            f"(K={self.num_frame_stack} grayscale frames), range [0, 1]"
-        )
+        self.observation_space = gym.spaces.Dict({
+            "rgb": gym.spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=frame_shape,
+                dtype=np.float32,
+            )
+        })
+        print(f"[INFO] TiledCamera mode: observation space = {frame_shape}")
 
-    # ================================================================
-    # Scene setup
-    # ================================================================
     def _setup_scene(self):
         stage = get_context().get_stage()
         if stage is None:
@@ -143,10 +133,10 @@ class TekoEnv(DirectRLEnv):
         # Arena, goal robot, ground plane
         self._setup_per_environment_assets(stage)
 
-        # Cameras
-        self._setup_cameras()
+        # TiledCamera (batched rendering)
+        self._setup_tiled_camera()
 
-        # Cache static robot positions
+        # Cache goal positions
         self._cache_goal_transforms()
 
     def _setup_global_lighting(self, stage):
@@ -163,10 +153,9 @@ class TekoEnv(DirectRLEnv):
         sun.CreateColorAttr(Gf.Vec3f(1.0, 0.98, 0.95))
         UsdGeom.Xformable(sun).AddRotateXOp().Set(-50.0)
         UsdGeom.Xformable(sun).AddRotateYOp().Set(30.0)
-        print("[INFO] Global lighting setup complete.")
 
     def _spawn_ground_plane(self, stage, env_idx: int):
-        """Create a static ground plane inside env_{idx}."""
+        """Create ground plane for environment."""
         env_root = f"/World/envs/env_{env_idx}"
         ground_path = f"{env_root}/Ground"
 
@@ -178,7 +167,6 @@ class TekoEnv(DirectRLEnv):
         thickness = 0.02
 
         xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, floor_z))
-
         hx = float(self._arena_half_x)
         hy = float(self._arena_half_y)
         xf.AddScaleOp().Set(Gf.Vec3d(hx, hy, thickness * 0.5))
@@ -211,38 +199,24 @@ class TekoEnv(DirectRLEnv):
 
             try:
                 TEKOStatic(prim_path=f"{env_path}/RobotGoal")
-                print(f"[INFO] Spawned static TEKO goal in env_{env_idx}")
             except Exception as e:
-                print(f"[WARN] Failed to create static TEKO goal in env_{env_idx}: {e}")
-
-            if getattr(self.cfg, "debug_boundaries", False):
-                self._spawn_arena_boundaries(stage, env_idx)
-            if getattr(self.cfg, "debug_robot_boxes", False):
-                self._spawn_robot_debug_boxes(stage, env_idx)
+                print(f"[WARN] Failed to create static TEKO in env_{env_idx}: {e}")
 
         print(f"[INFO] Created {num_envs} environments.")
 
-    def _setup_cameras(self):
-        """Attach one camera to each environment."""
-        for env_idx in range(self.scene.cfg.num_envs):
-            cam_path = (
-                f"/World/envs/env_{env_idx}/Robot/teko_urdf/TEKO_Body/"
-                "TEKO_WallBack/TEKO_Camera/RearCamera"
-            )
+    def _setup_tiled_camera(self):
+        """Setup TiledCamera for batched rendering."""
+        cam_cfg = TiledCameraCfg(
+            prim_path="/World/envs/env_.*/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera",
+            update_period=0,
+            height=self._cam_res[1],
+            width=self._cam_res[0],
+            data_types=["rgb"],
+            spawn=None,
+        )
 
-            cam_cfg = CameraCfg(
-                prim_path=cam_path,
-                update_period=0,
-                height=self._cam_res[1],
-                width=self._cam_res[0],
-                data_types=["rgb"],
-                spawn=None,
-            )
-
-            camera = Camera(cfg=cam_cfg)
-            self.cameras.append(camera)
-
-        print(f"[INFO] Initialized {len(self.cameras)} cameras.")
+        self.tiled_camera = TiledCamera(cfg=cam_cfg)
+        print(f"[INFO] TiledCamera initialized for {self.scene.cfg.num_envs} envs")
 
     def _cache_goal_transforms(self):
         """Precompute goal positions."""
@@ -253,65 +227,8 @@ class TekoEnv(DirectRLEnv):
             self.goal_positions[env_idx] = origin + local_goal
         print(f"[INFO] Cached {num_envs} goal positions.")
 
-    # ------------------------------------------------------------------
-    # Debug visualization
-    # ------------------------------------------------------------------
-    def _spawn_arena_boundaries(self, stage, env_idx: int):
-        """Draw thin red walls at arena limits."""
-        env_path = f"/World/envs/env_{env_idx}/Debug"
-        stage.DefinePrim(env_path, "Xform")
-
-        hx = float(self._arena_half_x)
-        hy = float(self._arena_half_y)
-
-        def make_wall(name: str, pos, scale):
-            prim_path = f"{env_path}/{name}"
-            cube = UsdGeom.Cube.Define(stage, Sdf.Path(prim_path))
-            xf = UsdGeom.Xformable(cube)
-            xf.ClearXformOpOrder()
-            xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
-            xf.AddScaleOp().Set(Gf.Vec3d(*scale))
-            UsdGeom.Gprim(cube).CreateDisplayColorAttr([Gf.Vec3f(1.0, 0.0, 0.0)])
-
-        z = 0.4
-        make_wall("Boundary_Xmin", pos=(-hx, 0.0, z), scale=(0.02, 2.0 * hy, 0.01))
-        make_wall("Boundary_Xmax", pos=(hx, 0.0, z), scale=(0.02, 2.0 * hy, 0.01))
-        make_wall("Boundary_Ymin", pos=(0.0, -hy, z), scale=(2.0 * hx, 0.02, 0.01))
-        make_wall("Boundary_Ymax", pos=(0.0, hy, z), scale=(2.0 * hx, 0.02, 0.01))
-
-    def _spawn_robot_debug_boxes(self, stage, env_idx: int):
-        """Attach debug boxes to robot bodies."""
-        env_root = f"/World/envs/env_{env_idx}"
-        active_root = f"{env_root}/Robot/teko_urdf/TEKO_Body"
-        static_root = f"{env_root}/RobotGoal/teko_urdf/TEKO_Body"
-
-        self._make_debug_box(
-            stage, active_root, "DebugChassisActive",
-            self._active_body_length, self._active_body_width,
-            Gf.Vec3f(0.0, 1.0, 0.0)
-        )
-        self._make_debug_box(
-            stage, static_root, "DebugChassisStatic",
-            self._static_body_length, self._static_body_width,
-            Gf.Vec3f(1.0, 0.0, 0.0)
-        )
-
-    def _make_debug_box(self, stage, parent_path: str, name: str, 
-                        length: float, width: float, color: Gf.Vec3f):
-        """Helper for debug box creation."""
-        box_path = f"{parent_path}/{name}"
-        cube = UsdGeom.Cube.Define(stage, Sdf.Path(box_path))
-        xf = UsdGeom.Xformable(cube)
-        xf.ClearXformOpOrder()
-        xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.05))
-        xf.AddScaleOp().Set(Gf.Vec3d(0.5 * length, 0.5 * width, 0.01))
-        UsdGeom.Gprim(cube).CreateDisplayColorAttr([color])
-
-    # ------------------------------------------------------------------
-    # Sphere distance computation
-    # ------------------------------------------------------------------
     def get_sphere_distances_from_physics(self):
-        """Compute distance between male/female connector spheres."""
+        """Compute connector distances."""
         FEMALE_OFFSET = torch.tensor([0.24, 0.0, -0.08], device=self.device)
         MALE_OFFSET = torch.tensor([-0.22667, -0.00144, -0.08815], device=self.device)
 
@@ -332,9 +249,6 @@ class TekoEnv(DirectRLEnv):
 
         return female_pos, male_pos, surface_xy, surface_3d
 
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
     def _lazy_init_articulation(self):
         """Initialize joint indices once robot is loaded."""
         if self.dof_idx is not None or getattr(self.robot, "root_physx_view", None) is None:
@@ -343,8 +257,8 @@ class TekoEnv(DirectRLEnv):
         name_to_idx = {n: i for i, n in enumerate(self.robot.joint_names)}
         indices = [name_to_idx[n] for n in self.cfg.dof_names if n in name_to_idx]
         if not indices:
-            raise RuntimeError(f"No valid DOF names found: {self.robot.joint_names}")
-        
+            raise RuntimeError(f"No valid DOF names: {self.robot.joint_names}")
+
         self.dof_idx = torch.tensor(indices, dtype=torch.long, device=self.device)
         print(f"[INFO] DOF indices: {self.dof_idx}")
 
@@ -366,12 +280,9 @@ class TekoEnv(DirectRLEnv):
         v_cmd = self.actions[:, 0]
         w_cmd = self.actions[:, 1]
 
-        v = v_cmd * 1.0
-        w = w_cmd * 1.0
-
         k = 3.0
-        left = torch.clamp(v + k * w, -1.0, 1.0)
-        right = torch.clamp(v - k * w, -1.0, 1.0)
+        left = torch.clamp(v_cmd - k * w_cmd, -1.0, 1.0)
+        right = torch.clamp(v_cmd + k * w_cmd, -1.0, 1.0)
 
         torque_targets = (
             torch.stack([left, right, left, right], dim=1) * self._max_wheel_torque
@@ -383,19 +294,14 @@ class TekoEnv(DirectRLEnv):
             torque_targets, env_ids=env_ids, joint_ids=self.dof_idx
         )
 
-    # ------------------------------------------------------------------
-    # Observations
-    # ------------------------------------------------------------------
     def _get_observations(self) -> dict:
-        """Capture RGB, convert to grayscale, return stacked frames."""
-        import torch.nn.functional as F
-
+        """Capture RGB from TiledCamera, convert to grayscale, stack frames."""
         num_envs = self.scene.cfg.num_envs
         h, w = self._cam_res[1], self._cam_res[0]
 
         if self.frame_stack is None:
             self.frame_stack = torch.zeros(
-                (num_envs, self.num_frame_stack, 1, h, w),
+                (num_envs, self.num_frame_stack, h, w),
                 device=self.device, dtype=torch.float32,
             )
         if self.frame_counts is None:
@@ -403,56 +309,48 @@ class TekoEnv(DirectRLEnv):
                 num_envs, device=self.device, dtype=torch.int32
             )
 
-        gray_current = torch.zeros((num_envs, 1, h, w), device=self.device)
+        # Update TiledCamera
+        self.tiled_camera.update(dt=0.0)
 
-        for env_idx, cam in enumerate(self.cameras):
-            cam.update(dt=0.0)
-            rgb_data = cam.data.output["rgb"]
-            if rgb_data is None or rgb_data.numel() == 0:
-                continue
+        # Get batched RGB data: [N, H, W, C]
+        rgb_data = self.tiled_camera.data.output["rgb"]
 
-            if rgb_data.ndim == 4:
-                rgb_data = rgb_data.squeeze(0)
-            if rgb_data.shape[-1] == 4:
-                rgb_data = rgb_data[..., :3]
+        if rgb_data is None or rgb_data.numel() == 0:
+            return {"rgb": self.frame_stack}
 
-            rgb = rgb_data.permute(2, 0, 1).float() / 255.0
+        # Handle RGBA -> RGB
+        if rgb_data.shape[-1] == 4:
+            rgb_data = rgb_data[..., :3]
 
-            if rgb.shape[1] != h or rgb.shape[2] != w:
-                rgb = F.interpolate(
-                    rgb.unsqueeze(0), size=(h, w),
-                    mode="bilinear", align_corners=False
-                ).squeeze(0)
+        # Convert to [N, C, H, W] and normalize
+        rgb = rgb_data.permute(0, 3, 1, 2).float() / 255.0
 
-            gray = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-            gray = gray.unsqueeze(0)
-            gray_current[env_idx] = gray
+        # Resize if needed
+        if rgb.shape[2] != h or rgb.shape[3] != w:
+            rgb = F.interpolate(rgb, size=(h, w), mode="bilinear", align_corners=False)
 
+        # Convert to grayscale: [N, 1, H, W] -> [N, H, W]
+        gray = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+
+        # Update frame stack
         reset_mask = self.frame_counts == 0
         if reset_mask.any():
             idx = reset_mask.nonzero(as_tuple=False).squeeze(-1)
-            self.frame_stack[idx, :, :, :, :] = gray_current[idx].unsqueeze(1)
+            self.frame_stack[idx] = gray[idx].unsqueeze(1).expand(-1, self.num_frame_stack, -1, -1)
             self.frame_counts[idx] = self.num_frame_stack
 
         non_reset_mask = ~reset_mask
         if non_reset_mask.any():
             idx = non_reset_mask.nonzero(as_tuple=False).squeeze(-1)
             self.frame_stack[idx, :-1] = self.frame_stack[idx, 1:].clone()
-            self.frame_stack[idx, -1] = gray_current[idx]
+            self.frame_stack[idx, -1] = gray[idx]
 
-        stacked = self.frame_stack.squeeze(2)
-        return {"rgb": stacked}
+        return {"rgb": self.frame_stack}
 
-    # ------------------------------------------------------------------
-    # Rewards
-    # ------------------------------------------------------------------
     def _get_rewards(self):
         """Delegate to reward function."""
         return compute_total_reward(self)
 
-    # ------------------------------------------------------------------
-    # Dones
-    # ------------------------------------------------------------------
     def _get_dones(self):
         """Episode termination logic."""
         _, _, surface_xy, _ = self.get_sphere_distances_from_physics()
@@ -509,9 +407,6 @@ class TekoEnv(DirectRLEnv):
 
         return terminated, time_out
 
-    # ------------------------------------------------------------------
-    # Reset
-    # ------------------------------------------------------------------
     def _reset_idx(self, env_ids):
         """Reset environments."""
         super()._reset_idx(env_ids)
