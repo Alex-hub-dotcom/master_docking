@@ -455,28 +455,31 @@
         <parent link="TEKO_Body" />
         <child link="TEKO_Chassi" />
     </joint>
+    <!-- RODAS CORRIGIDAS: eixos simétricos para movimento correto -->
+    <!-- Direitas: rpy +90° X, axis Z- -->
+    <!-- Esquerdas: rpy -90° X, axis Z+ -->
     <joint name="TEKO_Chassi_Back_wheel_right" type="continuous">
         <origin xyz="-0.12605402 -0.149 -0.09565" rpy="1.5707963267948966 -0.0 0.0" />
         <parent link="TEKO_Chassi" />
         <child link="TEKO_Back_wheel_right" />
-        <axis xyz="0.0 0.0 1.0" />
+        <axis xyz="0.0 0.0 -1.0" />
     </joint>
     <joint name="TEKO_Chassi_Front_wheel_right" type="continuous">
         <origin xyz="0.04784598000000001 -0.149 -0.09565" rpy="1.5707963267948966 -0.0 0.0" />
         <parent link="TEKO_Chassi" />
         <child link="TEKO_Front_wheel_right" />
-        <axis xyz="0.0 0.0 1.0" />
+        <axis xyz="0.0 0.0 -1.0" />
     </joint>
     <joint name="TEKO_Chassi_Back_wheel_left" type="continuous">
         <origin xyz="-0.12605402 0.015 -0.09565" rpy="-1.5707963267948966 -0.0 0.0" />
         <parent link="TEKO_Chassi" />
         <child link="TEKO_Back_wheel_left" />
-        <axis xyz="0.0 0.0 -1.0" />
+        <axis xyz="0.0 0.0 1.0" />
     </joint>
     <joint name="TEKO_Chassi_Front_wheel_left" type="continuous">
         <origin xyz="0.04784598000000001 0.015 -0.09565" rpy="-1.5707963267948966 -0.0 0.0" />
         <parent link="TEKO_Chassi" />
         <child link="TEKO_Front_wheel_left" />
-        <axis xyz="0.0 0.0 -1.0" />
+        <axis xyz="0.0 0.0 1.0" />
     </joint>
 </robot>
