@@ -41,7 +41,7 @@ class TekoEnv(DirectRLEnv):
 
     def __init__(self, cfg: TekoEnvCfg, render_mode: str | None = None, **kwargs):
         # Camera resolution
-        self._cam_res = (cfg.camera.width, cfg.camera.height)
+        self._cam_res = (cfg.tiled_camera.width, cfg.tiled_camera.height)
 
         # Frame stacking configuration
         self.num_frame_stack = getattr(cfg, "num_frame_stack", 4)
@@ -103,7 +103,7 @@ class TekoEnv(DirectRLEnv):
         import gymnasium as gym
 
         num_channels = self.num_frame_stack
-        frame_shape = (num_channels, self.cfg.camera.height, self.cfg.camera.width)
+        frame_shape = (num_channels, self.cfg.tiled_camera.height, self.cfg.tiled_camera.width)
 
         self.observation_space = gym.spaces.Dict(
             {
