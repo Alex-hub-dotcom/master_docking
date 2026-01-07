@@ -1,0 +1,142 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="stage_1">
+    <link name="Floor_Wall_1">
+        <inertial>
+            <origin xyz="-0.025 -0.25 1.95" rpy="0.0 -0.0 0.0" />
+            <mass value="765.375" />
+            <inertia ixx="986.0581250000008" iyy="970.2722656250007" izz="16.104765625001164" ixy="2.2737367544323206e-13" iyz="0.0" ixz="1.169741153717041e-14" />
+        </inertial>
+        <visual name="Floor_Wall_1_visual">
+            <origin xyz="-2.5500000000000003 0.2 1.95" rpy="1.5707963267948966 -1.5707963267948966 0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="Floor_Wall_1_collision">
+            <origin xyz="-2.5500000000000003 0.2 1.95" rpy="1.5707963267948966 -1.5707963267948966 0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="Floor_Wall_2">
+        <inertial>
+            <origin xyz="0.025 0.25 1.95" rpy="0.0 -0.0 0.0" />
+            <mass value="765.375" />
+            <inertia ixx="986.0581250000008" iyy="970.2722656250007" izz="16.104765625001164" ixy="2.2737367544323206e-13" iyz="4.678964614868164e-14" ixz="-7.603317499160767e-13" />
+        </inertial>
+        <visual name="Floor_Wall_2_visual">
+            <origin xyz="2.5500000000000003 -0.2 1.95" rpy="-1.5707963267948966 1.5707963267948966 0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_2.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="Floor_Wall_2_collision">
+            <origin xyz="2.5500000000000003 -0.2 1.95" rpy="-1.5707963267948966 1.5707963267948966 0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_2.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="Floor_Wall_3">
+        <inertial>
+            <origin xyz="-0.024999999999999717 -2.5500000000000003 0.25" rpy="0.0 -0.0 0.0" />
+            <mass value="1000.8749999999999" />
+            <inertia ixx="2190.2481249999996" iyy="21.060078125001382" izz="2169.6050781250005" ixy="0.0" iyz="0.0" ixz="-1.1368683772161603e-13" />
+        </inertial>
+        <visual name="Floor_Wall_3_visual">
+            <origin xyz="-2.0 -2.5500000000000003 -0.2" rpy="0.0 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_3.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="Floor_Wall_3_collision">
+            <origin xyz="-2.0 -2.5500000000000003 -0.2" rpy="0.0 -0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_3.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="Floor_Wood">
+        <inertial>
+            <origin xyz="1.9719507053447385 0.29995838903113425 -2.5157490879359163" rpy="0.0 -0.0 0.0" />
+            <mass value="1151.8563673317265" />
+            <inertia ixx="5106.235549384292" iyy="8543.864978764428" izz="3496.282721602195" ixy="-8.194784608478987" iyz="7.9939737680612595" ixz="-81.19757063910134" />
+        </inertial>
+        <visual name="Floor_Wood_visual">
+            <origin xyz="2.0 0.7000000000000001 -2.5500000000000003" rpy="-1.5707963267948966 -0.0 3.141592653589793" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wood.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="Floor_Wood_collision">
+            <origin xyz="2.0 0.7000000000000001 -2.5500000000000003" rpy="-1.5707963267948966 -0.0 3.141592653589793" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wood.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="Floor_Wall_4">
+        <inertial>
+            <origin xyz="2.5404561780095434 -0.02500250269188598 0.25013593567365716" rpy="0.0 -0.0 0.0" />
+            <mass value="996.0976368180916" />
+            <inertia ixx="20.961747824298072" iyy="2170.787878646822" izz="2150.241102837838" ixy="0.004822673573638525" iyz="0.0006170976110979609" ixz="-0.24934380104648923" />
+        </inertial>
+        <visual name="Floor_Wall_4_visual">
+            <origin xyz="2.5500000000000003 -2.0 -0.2" rpy="0.0 -0.0 -1.5707963267948966" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_4.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="Floor_Wall_4_collision">
+            <origin xyz="2.5500000000000003 -2.0 -0.2" rpy="0.0 -0.0 -1.5707963267948966" />
+            <geometry>
+                <mesh filename="meshes/Floor_Wall_4.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="Floor_Base">
+        <inertial>
+            <origin xyz="0.0 0.0 0.15000000000000002" rpy="0.0 0.0 0.0" />
+            <mass value="16014.0" />
+            <inertia ixx="34723.69000000001" iyy="21365.345000000023" izz="56062.34500000004" ixy="0.0" iyz="0.0" ixz="1.8715858459472656e-13" />
+        </inertial>
+        <visual name="Floor_Base_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Base.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="Floor_Base_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/Floor_Base.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <joint name="Floor_Base_Rígido-1" type="fixed">
+        <origin xyz="-2.0 -2.5500000000000003 0.2" rpy="0.0 -0.0 1.5707963267948966" />
+        <parent link="Floor_Base" />
+        <child link="Floor_Wall_4" />
+    </joint>
+    <joint name="Floor_Base_Rígido-2" type="fixed">
+        <origin xyz="2.0 2.5500000000000003 0.2" rpy="0.0 -0.0 0.0" />
+        <parent link="Floor_Base" />
+        <child link="Floor_Wall_3" />
+    </joint>
+    <joint name="Floor_Wall_3_Rígido-3" type="fixed">
+        <origin xyz="-0.05 0.0 0.0" rpy="1.5707963267948966 -0.0 -1.5707963267948966" />
+        <parent link="Floor_Wall_3" />
+        <child link="Floor_Wall_2" />
+    </joint>
+    <joint name="Floor_Wall_4_Rígido-4" type="fixed">
+        <origin xyz="0.0 -0.05 0.0" rpy="-1.5707963267948966 -0.0 3.141592653589793" />
+        <parent link="Floor_Wall_4" />
+        <child link="Floor_Wall_1" />
+    </joint>
+    <joint name="Floor_Wall_3_Rígido-5" type="fixed">
+        <origin xyz="0.0 -5.1000000000000005 0.5" rpy="-1.5707963267948966 -0.0 3.141592653589793" />
+        <parent link="Floor_Wall_3" />
+        <child link="Floor_Wood" />
+    </joint>
+</robot>
