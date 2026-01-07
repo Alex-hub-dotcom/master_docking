@@ -35,7 +35,7 @@ def test_config(env, name, torque_fn, steps=200):
     
     results = {}
     
-    for test_name, v, w in [("v=+1,w=0", 1.0, 0.0), ("v=0,w=+1", 0.0, 1.0), ("v=-1,w=0", -1.0, 0.0)]:
+    for test_name, v, w in [("v=+1,w=0", 1.0, 0.0), ("v=0,w=+1", 0.0, 1.0), ("v=0,w=-1", 0.0, -1.0), ("v=-1,w=0", -1.0, 0.0)]:
         env.reset()
         for _ in range(30):
             env.step(torch.tensor([[0.0, 0.0]], device=device))

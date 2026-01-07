@@ -366,7 +366,7 @@ class TekoEnv(DirectRLEnv):
         v_cmd = self.actions[:, 0]
         w_cmd = self.actions[:, 1]
 
-        v = v_cmd * 1.0
+        v = -v_cmd * 1.0
         w = w_cmd * 1.0
 
         k = 3.0
