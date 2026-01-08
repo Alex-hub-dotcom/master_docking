@@ -29,8 +29,8 @@ from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
 OPTUNA_CONFIG = {
-    "study_name": "teko_vision_imu_v7",
-    "storage_path": "/home/schux00/optuna/teko_vision_imu_v7.db",
+    "study_name": "teko_vision_imu_v8",
+    "storage_path": "/home/schux00/optuna/teko_vision_imu_v8.db",
     "target_total_trials": 200,
     "max_steps_per_trial": 15_000_000,
     "max_walltime_s_per_trial": 7 * 24 * 3600,
@@ -101,7 +101,7 @@ class VisionEncoder(nn.Module):
             nn.Conv2d(64, 128, 4, 2, 1), nn.GroupNorm(8, 128), nn.ReLU(True),
             nn.Conv2d(128, 256, 3, 2, 1), nn.GroupNorm(16, 256), nn.ReLU(True))
         with torch.no_grad():
-            flat_dim = int(self.conv(torch.zeros(1, in_channels, 84, 84)).view(1, -1).shape[1])
+            flat_dim = int(self.conv(torch.zeros(1, in_channels, 128, 128)).view(1, -1).shape[1])
         self.fc = nn.Sequential(nn.Linear(flat_dim, 512), nn.ReLU(True), nn.Linear(512, feature_dim), nn.ReLU(True))
         self.feature_dim = feature_dim
         for m in self.modules():
@@ -182,7 +182,7 @@ def ppo_update(policy, optimizer, obs_rgb, obs_imu, obs_priv, actions, old_log_p
     device = next(policy.parameters()).device
     T, N = obs_rgb.shape[:2]
     total = T * N
-    rgb_flat, imu_flat = obs_rgb.view(total, 4, 84, 84), obs_imu.view(total, 6)
+    rgb_flat, imu_flat = obs_rgb.view(total, 4, 128, 128), obs_imu.view(total, 6)
     act_flat, old_logp_flat = actions.view(total, 2), old_log_probs.view(total)
     adv_flat = (advantages.view(total) - advantages.mean()) / (advantages.std() + 1e-8)
     ret_flat = returns.view(total)
@@ -222,7 +222,7 @@ def objective(trial, env):
     obs_dict, _ = env.reset()
     has_privileged = "privileged" in obs_dict
     best_ssr, max_stage, next_eval, bad_eval_streak, last_stage_change_step = 0.0, 0, OPTUNA_CONFIG["eval_interval"], 0, 0
-    obs_rgb_u8 = torch.empty((rollout_len, num_envs, 4, 84, 84), device=device, dtype=torch.uint8)
+    obs_rgb_u8 = torch.empty((rollout_len, num_envs, 4, 128, 128), device=device, dtype=torch.uint8)
     obs_imu = torch.empty((rollout_len, num_envs, 6), device=device, dtype=torch.float32)
     obs_priv = torch.empty((rollout_len, num_envs, 7), device=device, dtype=torch.float32) if has_privileged else None
     actions = torch.empty((rollout_len, num_envs, 2), device=device, dtype=torch.float32)

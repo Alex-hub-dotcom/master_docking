@@ -59,8 +59,8 @@ print = partial(print, flush=True)
 # =============================================================================
 
 OPTUNA_CONFIG = {
-    "study_name": "teko_vision_v7",
-    "storage_path": "/home/schux00/optuna/teko_vision_v7.db",
+    "study_name": "teko_vision_v8",
+    "storage_path": "/home/schux00/optuna/teko_vision_v8.db",
 
     "target_total_trials": 200,
 
@@ -229,7 +229,7 @@ class VisionEncoder(nn.Module):
         
         # Compute flattened dimension
         with torch.no_grad():
-            dummy = torch.zeros(1, in_channels, 84, 84)
+            dummy = torch.zeros(1, in_channels, 128, 128)
             flat_dim = int(self.conv(dummy).view(1, -1).shape[1])
         
         self.fc = nn.Sequential(
@@ -483,7 +483,7 @@ def ppo_update(
     total = T * N
     
     # Flatten tensors
-    rgb_flat = obs_rgb.view(total, 4, 84, 84)
+    rgb_flat = obs_rgb.view(total, 4, 128, 128)
     act_flat = actions.view(total, 2)
     old_logp_flat = old_log_probs.view(total)
     adv_flat = advantages.view(total)
@@ -602,7 +602,7 @@ def objective(trial: optuna.Trial, env) -> Tuple[float, float]:
     last_stage_change_step = 0
     
     # Rollout buffers (store as uint8 to save memory)
-    obs_rgb_u8 = torch.empty((rollout_len, num_envs, 4, 84, 84), device=device, dtype=torch.uint8)
+    obs_rgb_u8 = torch.empty((rollout_len, num_envs, 4, 128, 128), device=device, dtype=torch.uint8)
     obs_priv = torch.empty((rollout_len, num_envs, 7), device=device, dtype=torch.float32) if has_privileged else None
     actions = torch.empty((rollout_len, num_envs, 2), device=device, dtype=torch.float32)
     rewards = torch.empty((rollout_len, num_envs), device=device, dtype=torch.float32)
