@@ -374,9 +374,9 @@ class TekoEnv(DirectRLEnv):
         right = torch.clamp(v - k * w, -1.0, 1.0)
 
         torque_targets = (
-            torch.stack([left, right, left, right], dim=1) * self._max_wheel_torque
+            torch.stack([-left, right, -left, right], dim=1) * self._max_wheel_torque
         )
-        torque_targets = torque_targets * self._polarity
+        # torque_targets = torque_targets * self._polarity  # REMOVIDO
 
         env_ids = torch.arange(num_envs, device=self.device)
         self.robot.set_joint_effort_target(
@@ -505,7 +505,8 @@ class TekoEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length
 
         if success.any():
-            print(f"[SUCCESS] {int(success.sum().item())} dockings!")
+            # print(f"[SUCCESS] {int(success.sum().item())} dockings!")
+            pass
 
         return terminated, time_out
 

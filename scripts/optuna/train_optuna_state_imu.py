@@ -53,8 +53,8 @@ print = partial(print, flush=True)
 # =============================================================================
 
 OPTUNA_CONFIG = {
-    "study_name": "teko_state_imu_v6",
-    "storage_path": "/home/schux00/optuna/teko_state_imu_v6.db",
+    "study_name": "teko_state_imu_v7",
+    "storage_path": "/home/schux00/optuna/teko_state_imu_v7.db",
 
     "target_total_trials": 100,
 

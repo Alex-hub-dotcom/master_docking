@@ -10,7 +10,7 @@ class TekoEnvStateIMU(TekoEnvState):
     
     def _get_observations(self) -> dict:
         robot_pos = self.robot.data.root_pos_w
-        goal_pos = self._goal_positions
+        goal_pos = self.goal_positions
         
         dx = goal_pos[:, 0] - robot_pos[:, 0]
         dy = goal_pos[:, 1] - robot_pos[:, 1]
