@@ -25,11 +25,11 @@ from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
 CONFIG = {
-    "max_steps": 50_000_000,
+    "max_steps": 150_000_000,
     "max_hours": 72,
     
     "learning_rate": 1e-4,
-    "entropy_coef": 0.005,
+    "entropy_coef": 0.015,
     "gae_lambda": 0.95,
     "gamma": 0.99,
     "clip_ratio": 0.2,

@@ -32,7 +32,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
     # General parameters
     # ------------------------------------------------------------------
     decimation = 2
-    episode_length_s = 15.0
+    episode_length_s = 25.0
     enable_curriculum = True
 
     debug_boundaries: bool = False
