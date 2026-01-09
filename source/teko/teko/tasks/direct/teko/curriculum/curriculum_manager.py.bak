@@ -71,17 +71,12 @@ STAGE_NAMES = [
     "Stage 21: Offset (±30°, ±8 cm)",
     "Stage 22: Offset (±30°, ±10 cm)",
     
-    # 180° turn stages (S23-S32): Gradual large angle maneuvers
+    # 180° turn stages (S23-S27): Large angle maneuvers
     "Stage 23: Large Angle (±45°, ±8 cm)",
-    "Stage 24: Large Angle (±60°, ±7 cm)",
-    "Stage 25: Large Angle (±75°, ±6 cm)",
-    "Stage 26: Perpendicular (±90°, ±5 cm)",
-    "Stage 27: Past Perpendicular (±105°, ±5 cm)",
-    "Stage 28: Large Turn (±120°, ±4 cm)",
-    "Stage 29: Rear Angle (±135°, ±4 cm)",
-    "Stage 30: Rear Angle (±150°, ±3 cm)",
-    "Stage 31: Near Full (±165°, ±3 cm)",
-    "Stage 32: Full Turn (±180°, ±3 cm)",
+    "Stage 24: Large Angle (±60°, ±6 cm)",
+    "Stage 25: Perpendicular (±90°, ±5 cm)",
+    "Stage 26: Rear Angle (±135°, ±4 cm)",
+    "Stage 27: Full Turn (±180°, ±3 cm)",
 ]
 
 
@@ -124,17 +119,12 @@ OFFSET_CONFIGS = {
     21: (30.0, 0.08, 0.25, 0.40),
     22: (30.0, 0.10, 0.25, 0.40),
     
-    # 180° stages (gradual progression for better learning)
+    # 180° stages (farther spawn for 84px visual clarity)
     23: (45.0,  0.08, 0.28, 0.45),
-    24: (60.0,  0.07, 0.29, 0.47),
-    25: (75.0,  0.06, 0.30, 0.49),
-    26: (90.0,  0.05, 0.32, 0.50),
-    27: (105.0, 0.05, 0.33, 0.51),
-    28: (120.0, 0.04, 0.34, 0.52),
-    29: (135.0, 0.04, 0.35, 0.53),
-    30: (150.0, 0.03, 0.36, 0.54),
-    31: (165.0, 0.03, 0.37, 0.55),
-    32: (180.0, 0.03, 0.38, 0.56),
+    24: (60.0,  0.06, 0.30, 0.48),
+    25: (90.0,  0.05, 0.32, 0.50),
+    26: (135.0, 0.04, 0.34, 0.52),
+    27: (180.0, 0.03, 0.36, 0.54),
 }
 
 # Replay probabilities per stage range (tuned for 84px visual learning)
@@ -142,7 +132,7 @@ REPLAY_PROBS = {
     "early": 0.15,      # S1-S6
     "micro": 0.18,      # S7-S12
     "ultra": 0.22,      # S13-S22
-    "turn": 0.25,       # S23-S32
+    "turn": 0.25,       # S23-S27
 }
 
 
@@ -182,7 +172,7 @@ def reset_environment_curriculum(env, env_ids: torch.Tensor) -> None:
 
 def _get_replay_probability(stage: int) -> float:
     """Get replay probability for anti-forgetting based on stage."""
-    if stage >= 23:  # turn stages S23-S32
+    if stage >= 23:
         return REPLAY_PROBS["turn"]
     elif stage >= 13:
         return REPLAY_PROBS["ultra"]

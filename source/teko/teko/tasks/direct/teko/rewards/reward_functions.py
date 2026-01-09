@@ -53,7 +53,9 @@ REWARD_CONFIG = {
     
     "approach_scale": 2.0,
     
-    "turning_bonus": 0.75,          # v8.9: 0.20 → 84px: 0.35
+    "yaw_progress_scale": 3.0,  # NEW: reward for reducing yaw error
+    
+    "turning_bonus": 2.0,          # v8.9: 0.20 → 84px: 0.35
     "turning_threshold_deg": 20.0,
     
     # Terminal rewards
@@ -69,7 +71,7 @@ REWARD_CONFIG = {
     
     # Time penalty
     "time_base": -0.02,
-    "time_exp_factor": 4.0,
+    "time_exp_factor": 2.0,
     "time_scale": 50.0,
     
     # Clipping
@@ -186,6 +188,21 @@ def _compute_turning_bonus(yaw_error: torch.Tensor, yaw_error_abs: torch.Tensor,
         torch.zeros_like(surface_xy),
     )
 
+
+
+def _compute_yaw_progress_reward(env, yaw_error_abs: torch.Tensor) -> torch.Tensor:
+    """Reward for reducing yaw error (helps with large rotations)."""
+    cfg = REWARD_CONFIG
+    
+    if not hasattr(env, "prev_yaw_error") or env.prev_yaw_error is None:
+        env.prev_yaw_error = yaw_error_abs.clone()
+    
+    yaw_progress = env.prev_yaw_error - yaw_error_abs  # positive when reducing error
+    reward = cfg["yaw_progress_scale"] * yaw_progress
+    reward = torch.clamp(reward, min=-2.0, max=2.0)
+    
+    env.prev_yaw_error = yaw_error_abs.clone()
+    return reward
 
 def _compute_collision_penalty(env, surface_xy: torch.Tensor) -> torch.Tensor:
     """Terminal penalty for collisions."""
@@ -307,6 +324,7 @@ def compute_total_reward(env) -> torch.Tensor:
     facing_bonus = _compute_facing_bonus(yaw_error_abs, surface_xy)
     approach_bonus = _compute_approach_bonus(progress, yaw_error_abs, surface_xy)
     turning_bonus = _compute_turning_bonus(yaw_error, yaw_error_abs, ang_vel, surface_xy)
+    yaw_progress_reward = _compute_yaw_progress_reward(env, yaw_error_abs)
     collision_penalty = _compute_collision_penalty(env, surface_xy)
     boundary_penalty = _compute_boundary_penalty(env, surface_xy)
     success_bonus = _compute_success_bonus(env, surface_xy)
@@ -322,6 +340,7 @@ def compute_total_reward(env) -> torch.Tensor:
         + facing_bonus
         + approach_bonus
         + turning_bonus
+        + yaw_progress_reward
         + collision_penalty
         + boundary_penalty
         + success_bonus
@@ -340,6 +359,7 @@ def compute_total_reward(env) -> torch.Tensor:
         "facing_bonus": facing_bonus,
         "approach_bonus": approach_bonus,
         "turning_bonus": turning_bonus,
+        "yaw_progress": yaw_progress_reward,
         "collision_penalty": collision_penalty,
         "boundary_penalty": boundary_penalty,
         "success_bonus": success_bonus,

@@ -45,7 +45,7 @@ REWARD_CONFIG = {
     "progress_min": -4.0,
     "progress_max": 4.0,
     
-    "alignment_scale": 0.20,        # v8.9: 0.30 → 84px: 0.20
+    "alignment_scale": 0.50,        # v8.9: 0.30 → 84px: 0.20
     
     "facing_bonus": 1.0,
     "facing_threshold_deg": 20.0,   # v8.9: 15° → 84px: 20°
@@ -53,7 +53,7 @@ REWARD_CONFIG = {
     
     "approach_scale": 2.0,
     
-    "turning_bonus": 0.35,          # v8.9: 0.20 → 84px: 0.35
+    "turning_bonus": 0.75,          # v8.9: 0.20 → 84px: 0.35
     "turning_threshold_deg": 20.0,
     
     # Terminal rewards
@@ -63,7 +63,7 @@ REWARD_CONFIG = {
     
     "boundary_penalty": -500.0,
     
-    "success_bonus": 400.0,
+    "success_bonus": 600.0,
     "success_distance": 0.03,
     "success_min_steps": 5,
     

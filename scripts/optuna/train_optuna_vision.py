@@ -59,8 +59,8 @@ print = partial(print, flush=True)
 # =============================================================================
 
 OPTUNA_CONFIG = {
-    "study_name": "teko_vision_v8",
-    "storage_path": "/home/schux00/optuna/teko_vision_v8.db",
+    "study_name": "teko_vision_v9",
+    "storage_path": "/home/schux00/optuna/teko_vision_v9.db",
 
     "target_total_trials": 200,
 

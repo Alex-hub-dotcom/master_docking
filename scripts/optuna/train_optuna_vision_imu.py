@@ -29,8 +29,8 @@ from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
 OPTUNA_CONFIG = {
-    "study_name": "teko_vision_imu_v8",
-    "storage_path": "/home/schux00/optuna/teko_vision_imu_v8.db",
+    "study_name": "teko_vision_imu_v9",
+    "storage_path": "/home/schux00/optuna/teko_vision_imu_v9.db",
     "target_total_trials": 200,
     "max_steps_per_trial": 15_000_000,
     "max_walltime_s_per_trial": 7 * 24 * 3600,
