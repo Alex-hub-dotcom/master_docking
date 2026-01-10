@@ -32,12 +32,12 @@ print = partial(print, flush=True)
 # =============================================================================
 CONFIG = {
     # Training
-    "max_steps": 150_000_000,        # 50M steps - enough to reach S32
+    "max_steps": 200_000_000,        # 50M steps - enough to reach S32
     "max_hours": 48,                 # 48h max
     
     # PPO (fixed, no tuning)
     "learning_rate": 1e-4,
-    "entropy_coef": 0.005,
+    "entropy_coef": 0.015,
     "gae_lambda": 0.95,
     "gamma": 0.99,
     "clip_ratio": 0.2,

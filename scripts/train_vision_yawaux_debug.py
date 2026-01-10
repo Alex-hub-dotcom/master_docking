@@ -25,7 +25,7 @@ from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
 CONFIG = {
-    "max_steps": 150_000_000,
+    "max_steps": 200_000_000,
     "max_hours": 72,
     
     "learning_rate": 1e-4,
