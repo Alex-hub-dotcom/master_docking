@@ -42,7 +42,7 @@ CONFIG = {
     
     "advance_threshold": 0.75,
     "min_steps_before_advance": 200_000,
-    "max_stage": 32,
+    "max_stage": 41,
     
     "log_interval": 50_000,
     "save_interval": 2_000_000,

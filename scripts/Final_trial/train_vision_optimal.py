@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-TEKO Vision + Spatial Attention + YawAux Head - Debug Training
-Best of both worlds: Attention helps CNN focus, YawAux supervises orientation
+TEKO Vision + Attention + YawAux - OPTIMAL CONFIG (Final)
+=========================================================
+Hyperparameters from Optuna Trial 80 (reached S41/180°)
+With TensorBoard logging for thesis figures.
+
+Author: Alexandre Schleier Neves da Silva
 """
 
 import os
@@ -12,8 +16,10 @@ import sys
 import math
 import socket
 import time
+import csv
 from collections import deque
 from functools import partial
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -24,13 +30,25 @@ import random
 from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
+# TensorBoard
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
+    print("[WARN] TensorBoard not available")
+
+# =============================================================================
+# OPTIMAL HYPERPARAMETERS from Optuna Trial 80 (S41/180°)
+# =============================================================================
 CONFIG = {
     "max_steps": 200_000_000,
-    "max_hours": 168,
+    "max_hours": 168,  # 7 days
     
-    "learning_rate": 0.000162,
-    "entropy_coef": 0.00622,
-    "gae_lambda": 0.9396,
+    # OPTIMAL from Optuna Trial 80
+    "learning_rate": 0.00016,
+    "entropy_coef": 0.0062,
+    "gae_lambda": 0.94,
     "gamma": 0.99,
     "clip_ratio": 0.2,
     "value_coef": 0.5,
@@ -38,9 +56,9 @@ CONFIG = {
     "epochs": 5,
     "batch_size": 1024,
     
-    "aux_yaw_coef": 0.308,  # YawAux loss weight
+    "aux_yaw_coef": 0.31,
     
-    "num_envs": 120,  # Slightly less due to attention overhead
+    "num_envs": 120,
     "rollout_len": 128,
     
     "advance_threshold": 0.75,
@@ -53,18 +71,15 @@ CONFIG = {
 
 
 class SpatialAttention(nn.Module):
-    """Spatial attention module - highlights important regions."""
     def __init__(self, in_channels):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, 1, kernel_size=1)
     
     def forward(self, x):
-        attn = torch.sigmoid(self.conv(x))
-        return x * attn
+        return x * torch.sigmoid(self.conv(x))
 
 
 class ChannelAttention(nn.Module):
-    """Channel attention - weighs feature channels."""
     def __init__(self, channels, reduction=4):
         super().__init__()
         self.fc = nn.Sequential(
@@ -77,23 +92,17 @@ class ChannelAttention(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
         y = x.view(b, c, -1).mean(-1)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y
+        return x * self.fc(y).view(b, c, 1, 1)
 
 
 class VisionEncoderAttentionYaw(nn.Module):
-    """CNN with Spatial+Channel Attention and YawAux head."""
     def __init__(self, in_channels=4, feature_dim=256):
         super().__init__()
-        
         self.conv1 = nn.Conv2d(in_channels, 32, 8, stride=4, padding=2)
         self.conv2 = nn.Conv2d(32, 64, 4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(64, 64, 3, stride=1, padding=1)
-        
-        # Attention after conv3
         self.channel_attn = ChannelAttention(64)
         self.spatial_attn = SpatialAttention(64)
-        
         self.gn1 = nn.GroupNorm(8, 32)
         self.gn2 = nn.GroupNorm(8, 64)
         self.gn3 = nn.GroupNorm(8, 64)
@@ -108,16 +117,11 @@ class VisionEncoderAttentionYaw(nn.Module):
         nn.init.orthogonal_(self.fc.weight, gain=1.0)
         nn.init.zeros_(self.fc.bias)
         
-        # Yaw auxiliary head
         self.yaw_head = nn.Sequential(
-            nn.Linear(feature_dim, 64),
-            nn.ReLU(True),
-            nn.Linear(64, 32),
-            nn.ReLU(True),
-            nn.Linear(32, 1),
-            nn.Tanh()  # Output in [-1, 1], scaled to [-pi, pi]
+            nn.Linear(feature_dim, 64), nn.ReLU(True),
+            nn.Linear(64, 32), nn.ReLU(True),
+            nn.Linear(32, 1), nn.Tanh()
         )
-        
         self.feature_dim = feature_dim
     
     def _init_weights(self):
@@ -129,55 +133,37 @@ class VisionEncoderAttentionYaw(nn.Module):
         x = F.relu(self.gn1(self.conv1(x)))
         x = F.relu(self.gn2(self.conv2(x)))
         x = F.relu(self.gn3(self.conv3(x)))
-        
-        # Apply attention
         x = self.channel_attn(x)
         x = self.spatial_attn(x)
-        
         return x.flatten(1)
     
     def forward(self, x):
-        x = self._forward_conv(x)
-        features = F.relu(self.fc(x))
-        return features
+        return F.relu(self.fc(self._forward_conv(x)))
     
     def predict_yaw(self, features):
-        """Predict yaw error from features. Output in [-pi, pi]."""
         return self.yaw_head(features) * math.pi
 
 
 class VisionIMUAttentionYawPolicy(nn.Module):
-    """Policy with Vision+Attention+IMU fusion and YawAux head."""
     LOG_STD_MIN, LOG_STD_MAX = -2.0, 0.5
     
     def __init__(self, vis_dim=256, imu_dim=6, hidden=256, action_dim=2):
         super().__init__()
-        
         self.vision_encoder = VisionEncoderAttentionYaw(in_channels=4, feature_dim=vis_dim)
-        
         self.imu_encoder = nn.Sequential(
-            nn.Linear(imu_dim, 64),
-            nn.ReLU(True),
-            nn.Linear(64, 64),
-            nn.ReLU(True),
+            nn.Linear(imu_dim, 64), nn.ReLU(True),
+            nn.Linear(64, 64), nn.ReLU(True),
         )
-        
         fused_dim = vis_dim + 64
-        
         self.actor_head = nn.Sequential(
-            nn.Linear(fused_dim, hidden),
-            nn.ReLU(True),
+            nn.Linear(fused_dim, hidden), nn.ReLU(True),
             nn.Linear(hidden, action_dim),
         )
         self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
-        
-        # Asymmetric critic with privileged info
-        priv_dim = 7  # dx, dy, dz, yaw_err, vx, vy, omega
+        priv_dim = 7
         self.critic_head = nn.Sequential(
-            nn.Linear(fused_dim + priv_dim, hidden),
-            nn.ReLU(True),
-            nn.Linear(hidden, hidden // 2),
-            nn.ReLU(True),
+            nn.Linear(fused_dim + priv_dim, hidden), nn.ReLU(True),
+            nn.Linear(hidden, hidden // 2), nn.ReLU(True),
             nn.Linear(hidden // 2, 1),
         )
     
@@ -191,11 +177,9 @@ class VisionIMUAttentionYawPolicy(nn.Module):
     
     def act(self, rgb, imu, privileged=None, deterministic=False):
         fused, vis_feat = self.forward_features(rgb, imu)
-        
         mean = self.actor_head(fused)
         std = self._std().unsqueeze(0).expand_as(mean)
         dist = torch.distributions.Normal(mean, std)
-        
         u = dist.mean if deterministic else dist.rsample()
         action = torch.tanh(u)
         log_prob = dist.log_prob(u).sum(-1) - torch.log(1 - action.pow(2) + 1e-6).sum(-1)
@@ -205,22 +189,16 @@ class VisionIMUAttentionYawPolicy(nn.Module):
         else:
             critic_in = torch.cat([fused, torch.zeros(fused.shape[0], 7, device=fused.device)], dim=-1)
         value = self.critic_head(critic_in).squeeze(-1)
-        
-        # Yaw prediction
         yaw_pred = self.vision_encoder.predict_yaw(vis_feat)
-        
         return action, log_prob, value, yaw_pred
     
     def evaluate(self, rgb, imu, actions, privileged=None):
         fused, vis_feat = self.forward_features(rgb, imu)
-        
         mean = self.actor_head(fused)
         std = self._std().unsqueeze(0).expand_as(mean)
         dist = torch.distributions.Normal(mean, std)
-        
         u = torch.clamp(actions, -0.999, 0.999)
         u = 0.5 * (torch.log1p(u) - torch.log1p(-u))
-        
         log_prob = dist.log_prob(u).sum(-1) - torch.log(1 - actions.pow(2) + 1e-6).sum(-1)
         entropy = dist.entropy().sum(-1)
         
@@ -229,9 +207,7 @@ class VisionIMUAttentionYawPolicy(nn.Module):
         else:
             critic_in = torch.cat([fused, torch.zeros(fused.shape[0], 7, device=fused.device)], dim=-1)
         value = self.critic_head(critic_in).squeeze(-1)
-        
         yaw_pred = self.vision_encoder.predict_yaw(vis_feat)
-        
         return log_prob, value, entropy, yaw_pred
 
 
@@ -239,13 +215,11 @@ def compute_gae(rewards, values, dones, gamma, lam, last_value):
     T, N = rewards.shape
     advantages = torch.zeros_like(rewards)
     last_gae = torch.zeros(N, device=rewards.device)
-    
     for t in reversed(range(T)):
         next_val = last_value if t == T - 1 else values[t + 1]
         delta = rewards[t] + gamma * next_val * (1 - dones[t]) - values[t]
         last_gae = delta + gamma * lam * (1 - dones[t]) * last_gae
         advantages[t] = last_gae
-    
     return advantages, advantages + values
 
 
@@ -263,40 +237,35 @@ def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantag
     yaw_flat = yaw_targets.view(total, 1)
     priv_flat = privileged.view(total, -1) if privileged is not None else None
     
-    metrics = {"policy_loss": 0, "value_loss": 0, "entropy": 0, "yaw_loss": 0}
+    metrics = {"policy_loss": 0, "value_loss": 0, "entropy": 0, "yaw_loss": 0, "grad_norm": 0}
     n_updates = 0
     
     for _ in range(cfg["epochs"]):
         idx = torch.randperm(total, device=device)
         for start in range(0, total, cfg["batch_size"]):
             mb = idx[start:start + cfg["batch_size"]]
-            
             priv_mb = priv_flat[mb] if priv_flat is not None else None
-            logp, val, ent, yaw_pred = policy.evaluate(
-                rgb_flat[mb], imu_flat[mb], actions_flat[mb], priv_mb
-            )
+            logp, val, ent, yaw_pred = policy.evaluate(rgb_flat[mb], imu_flat[mb], actions_flat[mb], priv_mb)
             
             ratio = torch.exp(logp - old_logp_flat[mb])
             surr1 = ratio * adv_flat[mb]
             surr2 = torch.clamp(ratio, 1 - cfg["clip_ratio"], 1 + cfg["clip_ratio"]) * adv_flat[mb]
-            
             p_loss = -torch.min(surr1, surr2).mean()
             v_loss = 0.5 * F.mse_loss(val, ret_flat[mb])
-            
-            # Yaw auxiliary loss
             yaw_loss = F.mse_loss(yaw_pred, yaw_flat[mb])
             
             loss = p_loss + cfg["value_coef"] * v_loss - cfg["entropy_coef"] * ent.mean() + cfg["aux_yaw_coef"] * yaw_loss
             
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"])
+            grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"]).item()
             optimizer.step()
             
             metrics["policy_loss"] += p_loss.item()
             metrics["value_loss"] += v_loss.item()
             metrics["entropy"] += ent.mean().item()
             metrics["yaw_loss"] += yaw_loss.item()
+            metrics["grad_norm"] += grad_norm
             n_updates += 1
     
     return {k: v / max(n_updates, 1) for k, v in metrics.items()}
@@ -327,9 +296,27 @@ def train(args):
     policy = VisionIMUAttentionYawPolicy().to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=CONFIG["learning_rate"])
     
+    # TensorBoard setup
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f"/home/schux00/tensorboard/vision_optimal_{timestamp}"
+    csv_path = f"/home/schux00/logs/vision_optimal_{timestamp}.csv"
+    
+    writer = None
+    if HAS_TENSORBOARD:
+        os.makedirs(log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir)
+        print(f"[TB] Logging to {log_dir}")
+    
+    # CSV logging
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(['step', 'stage', 'ssr', 'reward', 'entropy', 'yaw_loss', 'policy_loss', 'value_loss', 'hours'])
+    
     num_envs = CONFIG["num_envs"]
     rollout_len = CONFIG["rollout_len"]
     
+    # Buffers
     rgb_buf = torch.zeros((rollout_len, num_envs, 4, 128, 128), device=device)
     imu_buf = torch.zeros((rollout_len, num_envs, 6), device=device)
     actions_buf = torch.zeros((rollout_len, num_envs, 2), device=device)
@@ -355,18 +342,18 @@ def train(args):
     next_save = CONFIG["save_interval"]
     
     print("=" * 70)
-    print("TEKO Vision + Attention + YawAux - Debug Training")
+    print("TEKO Vision + Attention + YawAux - OPTIMAL (Final)")
     print("=" * 70)
     print(f"Host: {socket.gethostname()}")
     print(f"Envs: {num_envs} | Max Steps: {CONFIG['max_steps']:,}")
-    print(f"Entropy: {CONFIG['entropy_coef']} | YawAux Coef: {CONFIG['aux_yaw_coef']}")
+    print(f"LR: {CONFIG['learning_rate']} | Entropy: {CONFIG['entropy_coef']}")
+    print(f"GAE Lambda: {CONFIG['gae_lambda']} | Batch: {CONFIG['batch_size']}")
+    print(f"YawAux Coef: {CONFIG['aux_yaw_coef']}")
+    print(f"TensorBoard: {log_dir}")
+    print(f"CSV: {csv_path}")
     print("=" * 70)
     
     has_privileged = "privileged" in obs_dict and obs_dict["privileged"] is not None
-    if has_privileged:
-        print("[OK] Privileged observations available - YawAux + Attention ENABLED")
-    else:
-        print("[WARN] No privileged observations - YawAux supervision limited")
     
     try:
         while step < CONFIG["max_steps"]:
@@ -381,7 +368,7 @@ def train(args):
                 priv = obs_dict.get("privileged")
                 if priv is not None:
                     priv = priv.to(device)
-                    yaw_target = priv[:, 3:4]  # yaw_error at index 3
+                    yaw_target = priv[:, 3:4]
                 else:
                     yaw_target = torch.zeros(num_envs, 1, device=device)
                 
@@ -406,13 +393,11 @@ def train(args):
                 
                 if done.any():
                     done_idx = done.nonzero(as_tuple=False).squeeze(-1)
-                    
                     if hasattr(env, "_last_success"):
                         succ = env._last_success.float()
                     else:
                         _, _, sxy, _ = env.get_sphere_distances_from_physics()
                         succ = (sxy < 0.03).float()
-                    
                     ep_rewards.extend(cur_reward[done_idx].cpu().tolist())
                     stage_successes.extend(succ[done_idx].cpu().tolist())
                     cur_reward[done_idx] = 0
@@ -433,15 +418,15 @@ def train(args):
             )
             
             metrics = ppo_update_with_yaw(
-                policy, optimizer,
-                rgb_buf, imu_buf, actions_buf, logprobs_buf,
+                policy, optimizer, rgb_buf, imu_buf, actions_buf, logprobs_buf,
                 advantages, returns, yaw_targets_buf,
-                priv_buf if has_privileged else None,
-                CONFIG
+                priv_buf if has_privileged else None, CONFIG
             )
             
             ssr = float(np.mean(stage_successes)) if stage_successes else 0.0
+            mean_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
             
+            # Curriculum advancement
             if (len(stage_successes) >= 100 and
                 ssr >= CONFIG["advance_threshold"] and
                 step - last_advance_step >= CONFIG["min_steps_before_advance"] and
@@ -453,18 +438,40 @@ def train(args):
                 env.set_curriculum_level(current_stage)
                 stage_successes.clear()
                 last_advance_step = step
+                
+                if writer:
+                    writer.add_scalar("curriculum/stage", current_stage, step)
             
+            # Logging
             if step >= next_log:
-                mean_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
-                print(
-                    f"[{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | "
-                    f"R: {mean_r:.1f} | YawL: {metrics['yaw_loss']:.4f} | "
-                    f"Ent: {metrics['entropy']:.3f} | MaxS: {max_stage_reached} | {elapsed_h:.1f}h"
-                )
+                print(f"[{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | R: {mean_r:.1f} | "
+                      f"YawL: {metrics['yaw_loss']:.3f} | Ent: {metrics['entropy']:.3f} | "
+                      f"MaxS: {max_stage_reached} | {elapsed_h:.1f}h")
+                
+                # TensorBoard
+                if writer:
+                    writer.add_scalar("train/ssr", ssr, step)
+                    writer.add_scalar("train/reward", mean_r, step)
+                    writer.add_scalar("train/entropy", metrics["entropy"], step)
+                    writer.add_scalar("train/yaw_loss", metrics["yaw_loss"], step)
+                    writer.add_scalar("train/policy_loss", metrics["policy_loss"], step)
+                    writer.add_scalar("train/value_loss", metrics["value_loss"], step)
+                    writer.add_scalar("train/grad_norm", metrics["grad_norm"], step)
+                    writer.add_scalar("curriculum/stage", current_stage, step)
+                    writer.add_scalar("curriculum/max_stage", max_stage_reached, step)
+                
+                # CSV
+                csv_writer.writerow([step, current_stage, f"{ssr:.4f}", f"{mean_r:.2f}",
+                                    f"{metrics['entropy']:.4f}", f"{metrics['yaw_loss']:.4f}",
+                                    f"{metrics['policy_loss']:.4f}", f"{metrics['value_loss']:.4f}",
+                                    f"{elapsed_h:.2f}"])
+                csv_file.flush()
+                
                 next_log += CONFIG["log_interval"]
             
+            # Save checkpoint
             if step >= next_save:
-                ckpt_path = f"/home/schux00/checkpoints/vision_attn_yaw_S{current_stage}_{step//1000}k.pt"
+                ckpt_path = f"/home/schux00/checkpoints/vision_optimal_S{current_stage}_{step//1000}k.pt"
                 os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 torch.save({
                     "step": step,
@@ -472,10 +479,12 @@ def train(args):
                     "max_stage": max_stage_reached,
                     "policy": policy.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "config": CONFIG,
                 }, ckpt_path)
                 print(f"[SAVE] {ckpt_path}")
                 next_save += CONFIG["save_interval"]
             
+            # Early success
             if current_stage >= CONFIG["max_stage"] and ssr >= 0.70:
                 print("=" * 70)
                 print(f"[SUCCESS] Reached Stage {CONFIG['max_stage']} with SSR={ssr:.1%}!")
@@ -488,24 +497,23 @@ def train(args):
         print(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
-        print("\n[INTERRUPTED]")
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        import traceback
-        traceback.print_exc()
-        print("\n[INTERRUPTED]")
     
     finally:
-        final_path = f"/home/schux00/checkpoints/vision_attn_yaw_FINAL_S{max_stage_reached}.pt"
+        # Final save
+        final_path = f"/home/schux00/checkpoints/vision_optimal_FINAL_S{max_stage_reached}.pt"
         torch.save({
             "step": step,
             "stage": current_stage,
             "max_stage": max_stage_reached,
             "policy": policy.state_dict(),
+            "config": CONFIG,
         }, final_path)
         print(f"[FINAL] Saved to {final_path}")
         print(f"[DONE] MaxStage={max_stage_reached}, Steps={step:,}, Time={(time.time()-t0)/3600:.1f}h")
         
+        if writer:
+            writer.close()
+        csv_file.close()
         env.close()
         sim.close()
 
@@ -516,7 +524,6 @@ def main():
     args = parser.parse_args()
     args.headless = True
     args.enable_cameras = True
-    
     train(args)
 
 

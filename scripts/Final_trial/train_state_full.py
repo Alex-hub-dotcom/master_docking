@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-TEKO State+IMU Debug Training - NO OPTUNA
+TEKO State FULL - Oracle Baseline (Final)
 ==========================================
-Purpose: Prove the curriculum + rewards work by training to S32.
-Fixed hyperparameters from best trials.
+State-based policy with FULL information to actor.
+This gives dx, dy, dz, yaw_err to the ACTOR (not just critic).
+
+Purpose: Show that with perfect information, a simple MLP can reach S41.
+This is the "oracle" baseline - proves the task IS solvable.
+Vision policy achieving same result with only camera = thesis contribution.
+
+State to Actor: 10D [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
+(4D privileged position + 6D IMU velocities)
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -16,29 +23,36 @@ import sys
 import math
 import socket
 import time
+import csv
 from collections import deque
 from functools import partial
+from datetime import datetime
 
 import numpy as np
-import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import random
 from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
+
 # =============================================================================
-# FIXED HYPERPARAMETERS (from best Optuna trials)
+# CONFIGURATION - Optimized for State-based learning
 # =============================================================================
 CONFIG = {
-    # Training
-    "max_steps": 200_000_000,        # 50M steps - enough to reach S32
-    "max_hours": 48,                 # 48h max
+    "max_steps": 100_000_000,
+    "max_hours": 48,  # State is much faster than vision
     
-    # PPO (fixed, no tuning)
-    "learning_rate": 1e-4,
-    "entropy_coef": 0.015,
+    # Good hyperparameters for state-based
+    "learning_rate": 3e-4,
+    "entropy_coef": 0.01,
     "gae_lambda": 0.95,
     "gamma": 0.99,
     "clip_ratio": 0.2,
@@ -47,44 +61,61 @@ CONFIG = {
     "epochs": 5,
     "batch_size": 2048,
     
-    # Environment
-    "num_envs": 120,
+    "num_envs": 256,  # More envs since no vision overhead
     "rollout_len": 128,
     
-    # Curriculum
-    "advance_threshold": 0.75,      # 75% SSR to advance
+    "advance_threshold": 0.75,
     "min_steps_before_advance": 150_000,
-    "max_stage": 41,
+    "max_stage": 41,  # Can reach 180° with full info!
     
-    # Logging
     "log_interval": 50_000,
-    "save_interval": 1_000_000,
+    "save_interval": 2_000_000,
 }
 
 
-# =============================================================================
-# MLP POLICY (10D state -> 2D action)
-# =============================================================================
-class MLPPolicy(nn.Module):
+def atanh(x):
+    x = torch.clamp(x, -0.999, 0.999)
+    return 0.5 * (torch.log1p(x) - torch.log1p(-x))
+
+
+class MLPPolicyFull(nn.Module):
+    """
+    MLP policy with FULL state information to actor.
+    
+    Input: 10D [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
+    - dx, dy, dz: relative position to target (privileged)
+    - yaw_err: angular error to target (privileged)
+    - vx, vy, vz: linear velocity (from IMU)
+    - wx, wy, wz: angular velocity (from IMU)
+    
+    Output: 2D [v_cmd, w_cmd]
+    """
     LOG_STD_MIN, LOG_STD_MAX = -2.0, 0.5
     
-    def __init__(self, state_dim=10, action_dim=2, hidden=(256, 256, 128)):
+    def __init__(self, state_dim=10, action_dim=2, hidden_dims=(256, 256, 128)):
         super().__init__()
         
+        # Shared feature network
         layers = []
         in_dim = state_dim
-        for h in hidden:
+        for h in hidden_dims:
             layers.extend([nn.Linear(in_dim, h), nn.ReLU(True)])
             in_dim = h
-        self.features = nn.Sequential(*layers)
+        self.feature_net = nn.Sequential(*layers)
         
-        self.actor = nn.Sequential(
-            nn.Linear(hidden[-1], 64), nn.ReLU(True), nn.Linear(64, action_dim)
+        # Actor head
+        self.actor_head = nn.Sequential(
+            nn.Linear(hidden_dims[-1], 64),
+            nn.ReLU(True),
+            nn.Linear(64, action_dim),
         )
         self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
         
-        self.critic = nn.Sequential(
-            nn.Linear(hidden[-1], 64), nn.ReLU(True), nn.Linear(64, 1)
+        # Critic head
+        self.critic_head = nn.Sequential(
+            nn.Linear(hidden_dims[-1], 64),
+            nn.ReLU(True),
+            nn.Linear(64, 1),
         )
         
         self._init_weights()
@@ -95,54 +126,47 @@ class MLPPolicy(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=math.sqrt(2))
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        nn.init.orthogonal_(self.actor[-1].weight, gain=0.01)
+        nn.init.orthogonal_(self.actor_head[-1].weight, gain=0.01)
     
     def _std(self):
         return torch.exp(torch.clamp(self.log_std, self.LOG_STD_MIN, self.LOG_STD_MAX))
     
     def act(self, state, deterministic=False):
-        feat = self.features(state)
-        mean = self.actor(feat)
+        features = self.feature_net(state)
+        mean = self.actor_head(features)
         std = self._std().unsqueeze(0).expand_as(mean)
         dist = torch.distributions.Normal(mean, std)
         
         u = dist.mean if deterministic else dist.rsample()
         action = torch.tanh(u)
         log_prob = dist.log_prob(u).sum(-1) - torch.log(1 - action.pow(2) + 1e-6).sum(-1)
-        value = self.critic(feat).squeeze(-1)
+        value = self.critic_head(features).squeeze(-1)
         
         return action, log_prob, value
     
     def evaluate(self, state, actions):
-        feat = self.features(state)
-        mean = self.actor(feat)
+        features = self.feature_net(state)
+        mean = self.actor_head(features)
         std = self._std().unsqueeze(0).expand_as(mean)
         dist = torch.distributions.Normal(mean, std)
         
-        u = torch.clamp(actions, -0.999, 0.999)
-        u = 0.5 * (torch.log1p(u) - torch.log1p(-u))  # atanh
-        
+        u = atanh(actions)
         log_prob = dist.log_prob(u).sum(-1) - torch.log(1 - actions.pow(2) + 1e-6).sum(-1)
         entropy = dist.entropy().sum(-1)
-        value = self.critic(feat).squeeze(-1)
+        value = self.critic_head(features).squeeze(-1)
         
         return log_prob, value, entropy
 
 
-# =============================================================================
-# GAE & PPO
-# =============================================================================
 def compute_gae(rewards, values, dones, gamma, lam, last_value):
     T, N = rewards.shape
     advantages = torch.zeros_like(rewards)
     last_gae = torch.zeros(N, device=rewards.device)
-    
     for t in reversed(range(T)):
         next_val = last_value if t == T - 1 else values[t + 1]
         delta = rewards[t] + gamma * next_val * (1 - dones[t]) - values[t]
         last_gae = delta + gamma * lam * (1 - dones[t]) * last_gae
         advantages[t] = last_gae
-    
     return advantages, advantages + values
 
 
@@ -151,13 +175,13 @@ def ppo_update(policy, optimizer, states, actions, old_logp, advantages, returns
     T, N = states.shape[:2]
     total = T * N
     
-    states_flat = states.view(total, -1)
-    actions_flat = actions.view(total, -1)
+    state_flat = states.view(total, -1)
+    act_flat = actions.view(total, -1)
     old_logp_flat = old_logp.view(total)
     adv_flat = (advantages.view(total) - advantages.mean()) / (advantages.std() + 1e-8)
     ret_flat = returns.view(total)
     
-    metrics = {"policy_loss": 0, "value_loss": 0, "entropy": 0}
+    metrics = {"policy_loss": 0, "value_loss": 0, "entropy": 0, "grad_norm": 0}
     n_updates = 0
     
     for _ in range(cfg["epochs"]):
@@ -165,45 +189,40 @@ def ppo_update(policy, optimizer, states, actions, old_logp, advantages, returns
         for start in range(0, total, cfg["batch_size"]):
             mb = idx[start:start + cfg["batch_size"]]
             
-            logp, val, ent = policy.evaluate(states_flat[mb], actions_flat[mb])
+            logp, val, ent = policy.evaluate(state_flat[mb], act_flat[mb])
             
             ratio = torch.exp(logp - old_logp_flat[mb])
             surr1 = ratio * adv_flat[mb]
             surr2 = torch.clamp(ratio, 1 - cfg["clip_ratio"], 1 + cfg["clip_ratio"]) * adv_flat[mb]
-            
             p_loss = -torch.min(surr1, surr2).mean()
             v_loss = 0.5 * F.mse_loss(val, ret_flat[mb])
+            
             loss = p_loss + cfg["value_coef"] * v_loss - cfg["entropy_coef"] * ent.mean()
             
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"])
+            grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"]).item()
             optimizer.step()
             
             metrics["policy_loss"] += p_loss.item()
             metrics["value_loss"] += v_loss.item()
             metrics["entropy"] += ent.mean().item()
+            metrics["grad_norm"] += grad_norm
             n_updates += 1
     
     return {k: v / max(n_updates, 1) for k, v in metrics.items()}
 
 
-# =============================================================================
-# MAIN TRAINING LOOP
-# =============================================================================
 def train(args):
-    # Fixed seed for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
     random.seed(42)
     torch.backends.cudnn.benchmark = True
     device = torch.device("cuda:0")
     
-    # Launch Isaac Sim
     app = AppLauncher(args)
     sim = app.app
     
-    # Import environment
     sys.path.insert(0, "/workspace/teko/source/teko")
     from teko.tasks.direct.teko.teko_env_state_imu import TekoEnvStateIMU
     from teko.tasks.direct.teko.teko_env_cfg import TekoEnvCfg
@@ -214,14 +233,28 @@ def train(args):
     
     env = TekoEnvStateIMU(cfg=cfg)
     
-    # Policy & Optimizer
-    policy = MLPPolicy(state_dim=10, action_dim=2).to(device)
+    policy = MLPPolicyFull(state_dim=10, action_dim=2).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=CONFIG["learning_rate"])
     
-    # Buffers
+    # Logging setup
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f"/home/schux00/tensorboard/state_full_{timestamp}"
+    csv_path = f"/home/schux00/logs/state_full_{timestamp}.csv"
+    
+    writer = None
+    if HAS_TENSORBOARD:
+        os.makedirs(log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir)
+    
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(['step', 'stage', 'ssr', 'reward', 'entropy', 'policy_loss', 'value_loss', 'hours'])
+    
     num_envs = CONFIG["num_envs"]
     rollout_len = CONFIG["rollout_len"]
     
+    # Buffers - 10D state
     states_buf = torch.zeros((rollout_len, num_envs, 10), device=device)
     actions_buf = torch.zeros((rollout_len, num_envs, 2), device=device)
     rewards_buf = torch.zeros((rollout_len, num_envs), device=device)
@@ -229,18 +262,14 @@ def train(args):
     logprobs_buf = torch.zeros((rollout_len, num_envs), device=device)
     dones_buf = torch.zeros((rollout_len, num_envs), device=device)
     
-    # Tracking
     ep_rewards = deque(maxlen=300)
     stage_successes = deque(maxlen=300)
     cur_reward = torch.zeros(num_envs, device=device)
     
-    # Curriculum state
     current_stage = 0
     max_stage_reached = 0
     last_advance_step = 0
-    env.set_curriculum_level(0)
     
-    # Training loop
     obs_dict, _ = env.reset()
     step = 0
     t0 = time.time()
@@ -248,23 +277,24 @@ def train(args):
     next_save = CONFIG["save_interval"]
     
     print("=" * 70)
-    print("TEKO State+IMU Debug Training - NO OPTUNA")
+    print("TEKO State FULL - Oracle Baseline (Final)")
     print("=" * 70)
     print(f"Host: {socket.gethostname()}")
-    print(f"Envs: {num_envs} | Max steps: {CONFIG['max_steps']:,}")
-    print(f"Target: Stage {CONFIG['max_stage']} (180° full turn)")
+    print(f"Envs: {num_envs} | Max Steps: {CONFIG['max_steps']:,}")
+    print(f"State dim: 10 (4D privileged + 6D IMU)")
+    print(f"This policy receives FULL information - oracle baseline")
+    print(f"TensorBoard: {log_dir}")
     print("=" * 70)
     
     try:
         while step < CONFIG["max_steps"]:
-            # Check time limit
             elapsed_h = (time.time() - t0) / 3600
             if elapsed_h > CONFIG["max_hours"]:
                 print(f"[TIME] Reached {CONFIG['max_hours']}h limit")
                 break
             
-            # Collect rollout
             for t in range(rollout_len):
+                # Get 10D state: [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
                 state = obs_dict["policy"].to(device)
                 
                 with torch.no_grad():
@@ -282,11 +312,9 @@ def train(args):
                 dones_buf[t] = done.float()
                 cur_reward += reward
                 
-                # Track episode completions
                 if done.any():
                     done_idx = done.nonzero(as_tuple=False).squeeze(-1)
                     
-                    # Get success flags
                     if hasattr(env, "_last_success"):
                         succ = env._last_success.float()
                     else:
@@ -299,7 +327,6 @@ def train(args):
                 
                 step += num_envs
             
-            # GAE
             with torch.no_grad():
                 last_state = obs_dict["policy"].to(device)
                 _, _, last_value = policy.act(last_state)
@@ -309,15 +336,11 @@ def train(args):
                 CONFIG["gamma"], CONFIG["gae_lambda"], last_value
             )
             
-            # PPO update
-            metrics = ppo_update(
-                policy, optimizer,
-                states_buf, actions_buf, logprobs_buf,
-                advantages, returns, CONFIG
-            )
+            metrics = ppo_update(policy, optimizer, states_buf, actions_buf, logprobs_buf,
+                                advantages, returns, CONFIG)
             
-            # Calculate SSR
             ssr = float(np.mean(stage_successes)) if stage_successes else 0.0
+            mean_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
             
             # Curriculum advancement
             if (len(stage_successes) >= 100 and
@@ -331,20 +354,34 @@ def train(args):
                 env.set_curriculum_level(current_stage)
                 stage_successes.clear()
                 last_advance_step = step
+                
+                if writer:
+                    writer.add_scalar("curriculum/stage", current_stage, step)
             
             # Logging
             if step >= next_log:
-                mean_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
-                print(
-                    f"[{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | "
-                    f"R: {mean_r:.1f} | Ent: {metrics['entropy']:.3f} | "
-                    f"MaxS: {max_stage_reached} | {elapsed_h:.1f}h"
-                )
+                print(f"[{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | R: {mean_r:.1f} | "
+                      f"Ent: {metrics['entropy']:.3f} | MaxS: {max_stage_reached} | {elapsed_h:.1f}h")
+                
+                if writer:
+                    writer.add_scalar("train/ssr", ssr, step)
+                    writer.add_scalar("train/reward", mean_r, step)
+                    writer.add_scalar("train/entropy", metrics["entropy"], step)
+                    writer.add_scalar("train/policy_loss", metrics["policy_loss"], step)
+                    writer.add_scalar("train/value_loss", metrics["value_loss"], step)
+                    writer.add_scalar("curriculum/stage", current_stage, step)
+                    writer.add_scalar("curriculum/max_stage", max_stage_reached, step)
+                
+                csv_writer.writerow([step, current_stage, f"{ssr:.4f}", f"{mean_r:.2f}",
+                                    f"{metrics['entropy']:.4f}", f"{metrics['policy_loss']:.4f}",
+                                    f"{metrics['value_loss']:.4f}", f"{elapsed_h:.2f}"])
+                csv_file.flush()
+                
                 next_log += CONFIG["log_interval"]
             
-            # Save checkpoint
+            # Save
             if step >= next_save:
-                ckpt_path = f"/home/schux00/checkpoints/state_imu_debug_S{current_stage}_{step//1000}k.pt"
+                ckpt_path = f"/home/schux00/checkpoints/state_full_S{current_stage}_{step//1000}k.pt"
                 os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 torch.save({
                     "step": step,
@@ -352,33 +389,41 @@ def train(args):
                     "max_stage": max_stage_reached,
                     "policy": policy.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "config": CONFIG,
                 }, ckpt_path)
                 print(f"[SAVE] {ckpt_path}")
                 next_save += CONFIG["save_interval"]
             
-            # Victory condition
+            # Success condition
             if current_stage >= CONFIG["max_stage"] and ssr >= 0.70:
                 print("=" * 70)
-                print(f"[SUCCESS] Reached Stage {CONFIG['max_stage']} with SSR={ssr:.1%}!")
-                print(f"Total steps: {step:,} | Time: {elapsed_h:.1f}h")
+                print(f"[SUCCESS] State FULL reached S{CONFIG['max_stage']} with SSR={ssr:.1%}!")
+                print("This proves the task is solvable with perfect information.")
                 print("=" * 70)
                 break
     
     except KeyboardInterrupt:
         print("\n[INTERRUPTED]")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
-        # Final save
-        final_path = f"/home/schux00/checkpoints/state_imu_debug_FINAL_S{max_stage_reached}.pt"
+        final_path = f"/home/schux00/checkpoints/state_full_FINAL_S{max_stage_reached}.pt"
         torch.save({
             "step": step,
             "stage": current_stage,
             "max_stage": max_stage_reached,
             "policy": policy.state_dict(),
+            "config": CONFIG,
         }, final_path)
         print(f"[FINAL] Saved to {final_path}")
         print(f"[DONE] MaxStage={max_stage_reached}, Steps={step:,}, Time={(time.time()-t0)/3600:.1f}h")
         
+        if writer:
+            writer.close()
+        csv_file.close()
         env.close()
         sim.close()
 
@@ -388,8 +433,7 @@ def main():
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.headless = True
-    args.enable_cameras = False
-    
+    args.enable_cameras = False  # No cameras needed!
     train(args)
 
 
