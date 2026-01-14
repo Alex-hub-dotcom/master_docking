@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-TEKO State FULL - Oracle Baseline (Final)
-==========================================
+TEKO State FULL v3 - Oracle Baseline (Fixed Entropy)
+=====================================================
 State-based policy with FULL information to actor.
-This gives dx, dy, dz, yaw_err to the ACTOR (not just critic).
 
-Purpose: Show that with perfect information, a simple MLP can reach S41.
-This is the "oracle" baseline - proves the task IS solvable.
-Vision policy achieving same result with only camera = thesis contribution.
-
-State to Actor: 10D [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
-(4D privileged position + 6D IMU velocities)
+Fixes from v2:
+- LOG_STD_MIN: -2.0 → -1.0 (prevents negative entropy)
+- entropy_coef: 0.005 → 0.01
+- Using Trial 80 HPs that worked for Vision Optimal
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -44,29 +41,29 @@ except ImportError:
     HAS_TENSORBOARD = False
 
 # =============================================================================
-# CONFIGURATION - Optimized for State-based learning
+# CONFIGURATION v3 - Fixed entropy, Trial 80 HPs
 # =============================================================================
 CONFIG = {
-    "max_steps": 100_000_000,
-    "max_hours": 48,  # State is much faster than vision
+    "max_steps": 150_000_000,
+    "max_hours": 48,
     
-    # Good hyperparameters for state-based
-    "learning_rate": 3e-4,
-    "entropy_coef": 0.01,
-    "gae_lambda": 0.95,
+    # Trial 80 HPs (proven to reach S41 in Vision)
+    "learning_rate": 1.62e-4,  # Trial 80
+    "entropy_coef": 0.01,  # Back to working value
+    "gae_lambda": 0.9396,  # Trial 80
     "gamma": 0.99,
     "clip_ratio": 0.2,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
     "epochs": 5,
-    "batch_size": 2048,
+    "batch_size": 1024,  # Trial 80
     
-    "num_envs": 256,  # More envs since no vision overhead
+    "num_envs": 256,
     "rollout_len": 128,
     
     "advance_threshold": 0.75,
-    "min_steps_before_advance": 150_000,
-    "max_stage": 41,  # Can reach 180° with full info!
+    "min_steps_before_advance": 200_000,
+    "max_stage": 41,
     
     "log_interval": 50_000,
     "save_interval": 2_000_000,
@@ -83,19 +80,14 @@ class MLPPolicyFull(nn.Module):
     MLP policy with FULL state information to actor.
     
     Input: 10D [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
-    - dx, dy, dz: relative position to target (privileged)
-    - yaw_err: angular error to target (privileged)
-    - vx, vy, vz: linear velocity (from IMU)
-    - wx, wy, wz: angular velocity (from IMU)
-    
     Output: 2D [v_cmd, w_cmd]
     """
-    LOG_STD_MIN, LOG_STD_MAX = -2.0, 0.5
+    # FIXED: -1.0 instead of -2.0 to prevent negative entropy
+    LOG_STD_MIN, LOG_STD_MAX = -1.0, 0.5
     
     def __init__(self, state_dim=10, action_dim=2, hidden_dims=(256, 256, 128)):
         super().__init__()
         
-        # Shared feature network
         layers = []
         in_dim = state_dim
         for h in hidden_dims:
@@ -103,7 +95,6 @@ class MLPPolicyFull(nn.Module):
             in_dim = h
         self.feature_net = nn.Sequential(*layers)
         
-        # Actor head
         self.actor_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], 64),
             nn.ReLU(True),
@@ -111,7 +102,6 @@ class MLPPolicyFull(nn.Module):
         )
         self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
         
-        # Critic head
         self.critic_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], 64),
             nn.ReLU(True),
@@ -238,8 +228,8 @@ def train(args):
     
     # Logging setup
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = f"/home/schux00/tensorboard/state_full_{timestamp}"
-    csv_path = f"/home/schux00/logs/state_full_{timestamp}.csv"
+    log_dir = f"/home/schux00/tensorboard/state_full_v3_{timestamp}"
+    csv_path = f"/home/schux00/logs/state_full_v3_{timestamp}.csv"
     
     writer = None
     if HAS_TENSORBOARD:
@@ -254,7 +244,7 @@ def train(args):
     num_envs = CONFIG["num_envs"]
     rollout_len = CONFIG["rollout_len"]
     
-    # Buffers - 10D state
+    # Buffers
     states_buf = torch.zeros((rollout_len, num_envs, 10), device=device)
     actions_buf = torch.zeros((rollout_len, num_envs, 2), device=device)
     rewards_buf = torch.zeros((rollout_len, num_envs), device=device)
@@ -277,12 +267,12 @@ def train(args):
     next_save = CONFIG["save_interval"]
     
     print("=" * 70)
-    print("TEKO State FULL - Oracle Baseline (Final)")
+    print("TEKO State FULL v3 - Oracle Baseline (Fixed Entropy)")
     print("=" * 70)
     print(f"Host: {socket.gethostname()}")
     print(f"Envs: {num_envs} | Max Steps: {CONFIG['max_steps']:,}")
-    print(f"State dim: 10 (4D privileged + 6D IMU)")
-    print(f"This policy receives FULL information - oracle baseline")
+    print(f"Fixes: LOG_STD_MIN=-1.0, entropy_coef=0.01, Trial 80 HPs")
+    print(f"HPs: lr={CONFIG['learning_rate']:.2e}, gae={CONFIG['gae_lambda']}, batch={CONFIG['batch_size']}")
     print(f"TensorBoard: {log_dir}")
     print("=" * 70)
     
@@ -294,7 +284,6 @@ def train(args):
                 break
             
             for t in range(rollout_len):
-                # Get 10D state: [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
                 state = obs_dict["policy"].to(device)
                 
                 with torch.no_grad():
@@ -379,9 +368,9 @@ def train(args):
                 
                 next_log += CONFIG["log_interval"]
             
-            # Save
+            # Save checkpoints
             if step >= next_save:
-                ckpt_path = f"/home/schux00/checkpoints/state_full_S{current_stage}_{step//1000}k.pt"
+                ckpt_path = f"/home/schux00/checkpoints/state_full_v3_S{current_stage}_{step//1000}k.pt"
                 os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 torch.save({
                     "step": step,
@@ -397,8 +386,7 @@ def train(args):
             # Success condition
             if current_stage >= CONFIG["max_stage"] and ssr >= 0.70:
                 print("=" * 70)
-                print(f"[SUCCESS] State FULL reached S{CONFIG['max_stage']} with SSR={ssr:.1%}!")
-                print("This proves the task is solvable with perfect information.")
+                print(f"[SUCCESS] State FULL v3 reached S{CONFIG['max_stage']} with SSR={ssr:.1%}!")
                 print("=" * 70)
                 break
     
@@ -410,7 +398,7 @@ def train(args):
         traceback.print_exc()
     
     finally:
-        final_path = f"/home/schux00/checkpoints/state_full_FINAL_S{max_stage_reached}.pt"
+        final_path = f"/home/schux00/checkpoints/state_full_v3_FINAL_S{max_stage_reached}.pt"
         torch.save({
             "step": step,
             "stage": current_stage,
@@ -433,7 +421,7 @@ def main():
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.headless = True
-    args.enable_cameras = False  # No cameras needed!
+    args.enable_cameras = False
     train(args)
 
 
