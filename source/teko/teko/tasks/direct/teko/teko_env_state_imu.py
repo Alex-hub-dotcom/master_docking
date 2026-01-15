@@ -18,7 +18,7 @@ class TekoEnvStateIMU(TekoEnvState):
         
         robot_quat = self.robot.data.root_quat_w
         robot_yaw = 2.0 * torch.atan2(robot_quat[:, 2], robot_quat[:, 3])
-        goal_yaw = torch.zeros_like(robot_yaw)
+        goal_yaw = torch.atan2(-dy, -dx)  # <-- CORRIGIDO: usar dx, dy
         yaw_err = torch.atan2(torch.sin(goal_yaw - robot_yaw), torch.cos(goal_yaw - robot_yaw))
         
         lin_vel = self.robot.data.root_lin_vel_w
