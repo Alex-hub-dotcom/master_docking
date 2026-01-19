@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-TEKO Vision + Attention + YawAux - Optuna v3 (SQLite + NSGA-II)
-===============================================================
-Single objective: maximize max_stage reached
-SQLite storage for Optuna Dashboard compatibility.
-NSGA-II genetic algorithm sampler.
+TEKO Vision + Attention + YawAux - OPTIMAL CONFIG with NOISE
+=============================================================
+Hyperparameters from Optuna Trial 80 (reached S41/180°)
+WITH domain randomization (sensor noise) for robust sim-to-real.
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -17,7 +16,6 @@ import sys
 import math
 import socket
 import time
-import random
 import csv
 from collections import deque
 from functools import partial
@@ -28,76 +26,58 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-try:
-    import optuna
-except ImportError:
-    print("ERROR: optuna not installed", flush=True)
-    sys.exit(1)
+import random
+from isaaclab.app import AppLauncher
+print = partial(print, flush=True)
 
+# TensorBoard
 try:
     from torch.utils.tensorboard import SummaryWriter
     HAS_TENSORBOARD = True
 except ImportError:
     HAS_TENSORBOARD = False
-
-from isaaclab.app import AppLauncher
-print = partial(print, flush=True)
+    print("[WARN] TensorBoard not available")
 
 # =============================================================================
-# CONFIGURATION v3 - SQLite + Single Objective + NSGA-II
+# OPTIMAL HYPERPARAMETERS from Optuna Trial 80 (S41/180°) + NOISE CONFIG
 # =============================================================================
-OPTUNA_CONFIG = {
-    "study_name": "teko_vision_final_v3",
-    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v3.db",
-    "target_total_trials": 1000,
-    "max_steps_per_trial": 200_000_000,
-    "max_walltime_s_per_trial": 24 * 3600,  # 24h per trial
+CONFIG = {
+    "max_steps": 200_000_000,
+    "max_hours": 168,  # 7 days
     
-    # Pruning config
-    "pruning_enabled": True,
-    "pruning_warmup_steps": 2_000_000,
-    "pruning_check_interval": 500_000,
-    "min_stage_schedule": {
-        2_000_000: 3,
-        5_000_000: 8,
-        10_000_000: 15,
-        20_000_000: 25,
-        30_000_000: 32,
-    },
-    "success_surface_xy": 0.03,
-}
-
-# Fixed params (same as optimal config)
-FIXED_PARAMS = {
+    # OPTIMAL from Optuna Trial 80
+    "learning_rate": 0.00016,
+    "entropy_coef": 0.0062,
+    "gae_lambda": 0.94,
     "gamma": 0.99,
+    "clip_ratio": 0.2,
     "value_coef": 0.5,
     "max_grad_norm": 0.5,
-    "clip_ratio": 0.2,
+    "epochs": 5,
+    "batch_size": 1024,
+    
+    "aux_yaw_coef": 0.31,
+    
     "num_envs": 120,
     "rollout_len": 128,
+    
     "advance_threshold": 0.75,
     "min_steps_before_advance": 200_000,
     "max_stage": 41,
+    
     "log_interval": 50_000,
     "save_interval": 2_000_000,
+    
+    # ===================
+    # NOISE / DOMAIN RANDOMIZATION
+    # ===================
+    "rgb_noise_std": 0.03,      # Gaussian noise std for RGB (pixel values 0-1)
+    "imu_noise_std": 0.02,      # Gaussian noise std for IMU
+    "rgb_noise_prob": 1.0,      # Probability of applying RGB noise (1.0 = always)
+    "imu_noise_prob": 1.0,      # Probability of applying IMU noise (1.0 = always)
 }
 
 
-def should_prune(step, max_stage):
-    """Check if trial should be pruned based on progress."""
-    if step < OPTUNA_CONFIG["pruning_warmup_steps"]:
-        return False
-    schedule = OPTUNA_CONFIG["min_stage_schedule"]
-    for step_threshold in sorted(schedule.keys()):
-        if step >= step_threshold:
-            if max_stage < schedule[step_threshold]:
-                return True
-    return False
-
-
-# =============================================================================
-# NEURAL NETWORK (identical to optimal config)
-# =============================================================================
 class SpatialAttention(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -239,9 +219,31 @@ class VisionIMUAttentionYawPolicy(nn.Module):
         return log_prob, value, entropy, yaw_pred
 
 
-# =============================================================================
-# PPO FUNCTIONS (identical to optimal config)
-# =============================================================================
+def add_sensor_noise(rgb, imu, cfg):
+    """
+    Add Gaussian noise to RGB and IMU observations for domain randomization.
+    
+    Args:
+        rgb: [N, C, H, W] tensor (values assumed in range [0, 1])
+        imu: [N, 6] tensor
+        cfg: config dict with noise parameters
+    
+    Returns:
+        rgb_noisy, imu_noisy
+    """
+    # RGB noise
+    if cfg["rgb_noise_std"] > 0 and random.random() < cfg["rgb_noise_prob"]:
+        rgb_noise = torch.randn_like(rgb) * cfg["rgb_noise_std"]
+        rgb = torch.clamp(rgb + rgb_noise, 0.0, 1.0)
+    
+    # IMU noise
+    if cfg["imu_noise_std"] > 0 and random.random() < cfg["imu_noise_prob"]:
+        imu_noise = torch.randn_like(imu) * cfg["imu_noise_std"]
+        imu = imu + imu_noise
+    
+    return rgb, imu
+
+
 def compute_gae(rewards, values, dones, gamma, lam, last_value):
     T, N = rewards.shape
     advantages = torch.zeros_like(rewards)
@@ -254,8 +256,7 @@ def compute_gae(rewards, values, dones, gamma, lam, last_value):
     return advantages, advantages + values
 
 
-def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantages, returns, 
-                         yaw_targets, privileged, cfg):
+def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantages, returns, yaw_targets, privileged, cfg):
     device = next(policy.parameters()).device
     T, N = rgb.shape[:2]
     total = T * N
@@ -303,60 +304,52 @@ def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantag
     return {k: v / max(n_updates, 1) for k, v in metrics.items()}
 
 
-# =============================================================================
-# OPTUNA OBJECTIVE
-# =============================================================================
-def objective(trial, env, base_log_dir):
-    """Single objective: maximize max_stage reached."""
-    
-    # ==========================================================================
-    # VARIABLE HYPERPARAMETERS (to optimize)
-    # ==========================================================================
-    learning_rate = trial.suggest_float("learning_rate", 5e-5, 3e-4, log=True)
-    entropy_coef = trial.suggest_float("entropy_coef", 0.003, 0.015, log=True)
-    gae_lambda = trial.suggest_float("gae_lambda", 0.90, 0.98)
-    epochs = trial.suggest_int("epochs", 3, 7)
-    batch_size = trial.suggest_categorical("batch_size", [1024, 2048])
-    aux_yaw_coef = trial.suggest_float("aux_yaw_coef", 0.15, 0.45)
-    
-    # Build config dict (merge fixed + variable)
-    cfg = {
-        **FIXED_PARAMS,
-        "learning_rate": learning_rate,
-        "entropy_coef": entropy_coef,
-        "gae_lambda": gae_lambda,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "aux_yaw_coef": aux_yaw_coef,
-    }
-    
+def train(args):
+    # Fixed seed for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    torch.backends.cudnn.benchmark = True
     device = torch.device("cuda:0")
-    env.set_curriculum_level(0)
+    
+    app = AppLauncher(args)
+    sim = app.app
+    
+    sys.path.insert(0, "/workspace/teko/source/teko")
+    from teko.tasks.direct.teko.teko_env_tiled_imu import TekoEnvTiledIMU
+    from teko.tasks.direct.teko.teko_env_cfg import TekoEnvCfg
+    
+    cfg = TekoEnvCfg()
+    cfg.scene.num_envs = CONFIG["num_envs"]
+    cfg.enable_curriculum = True
+    cfg.asymmetric_critic = True
+    
+    env = TekoEnvTiledIMU(cfg=cfg)
     
     policy = VisionIMUAttentionYawPolicy().to(device)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=cfg["learning_rate"])
+    optimizer = torch.optim.Adam(policy.parameters(), lr=CONFIG["learning_rate"])
     
-    # TensorBoard + CSV for this trial
-    writer = None
-    csv_file = None
-    csv_writer = None
+    # TensorBoard setup - NOISY version
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f"/home/schux00/tensorboard/vision_optimal_noisy_{timestamp}"
+    csv_path = f"/home/schux00/logs/vision_optimal_noisy_{timestamp}.csv"
     
+    writer = None
     if HAS_TENSORBOARD:
-        trial_log_dir = f"{base_log_dir}/trial_{trial.number}"
-        os.makedirs(trial_log_dir, exist_ok=True)
-        writer = SummaryWriter(trial_log_dir)
+        os.makedirs(log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir)
+        print(f"[TB] Logging to {log_dir}")
     
-    csv_path = f"/home/schux00/logs/optuna_v3_T{trial.number}_{timestamp}.csv"
+    # CSV logging
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     csv_file = open(csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(['step', 'stage', 'ssr', 'reward', 'entropy', 'yaw_loss', 'policy_loss', 'value_loss', 'hours'])
     
-    num_envs = cfg["num_envs"]
-    rollout_len = cfg["rollout_len"]
+    num_envs = CONFIG["num_envs"]
+    rollout_len = CONFIG["rollout_len"]
     
-    # Buffers (identical to optimal)
+    # Buffers
     rgb_buf = torch.zeros((rollout_len, num_envs, 4, 128, 128), device=device)
     imu_buf = torch.zeros((rollout_len, num_envs, 6), device=device)
     actions_buf = torch.zeros((rollout_len, num_envs, 2), device=device)
@@ -378,32 +371,40 @@ def objective(trial, env, base_log_dir):
     obs_dict, _ = env.reset()
     step = 0
     t0 = time.time()
-    next_log = cfg["log_interval"]
-    next_save = cfg["save_interval"]
-    next_prune_check = OPTUNA_CONFIG["pruning_check_interval"]
+    next_log = CONFIG["log_interval"]
+    next_save = CONFIG["save_interval"]
+    
+    print("=" * 70)
+    print("TEKO Vision + Attention + YawAux - OPTIMAL with NOISE")
+    print("=" * 70)
+    print(f"Host: {socket.gethostname()}")
+    print(f"Envs: {num_envs} | Max Steps: {CONFIG['max_steps']:,}")
+    print(f"LR: {CONFIG['learning_rate']} | Entropy: {CONFIG['entropy_coef']}")
+    print(f"GAE Lambda: {CONFIG['gae_lambda']} | Batch: {CONFIG['batch_size']}")
+    print(f"YawAux Coef: {CONFIG['aux_yaw_coef']}")
+    print(f"RGB Noise: {CONFIG['rgb_noise_std']} | IMU Noise: {CONFIG['imu_noise_std']}")
+    print(f"TensorBoard: {log_dir}")
+    print(f"CSV: {csv_path}")
+    print("=" * 70)
     
     has_privileged = "privileged" in obs_dict and obs_dict["privileged"] is not None
     
-    print("=" * 70)
-    print(f"[TRIAL {trial.number}] TEKO Vision Optuna v3 - NSGA-II")
-    print("=" * 70)
-    print(f"Host: {socket.gethostname()}")
-    print(f"LR: {cfg['learning_rate']:.6f} | Entropy: {cfg['entropy_coef']:.4f}")
-    print(f"GAE Lambda: {cfg['gae_lambda']:.2f} | Batch: {cfg['batch_size']}")
-    print(f"Epochs: {cfg['epochs']} | YawAux: {cfg['aux_yaw_coef']:.2f}")
-    print("=" * 70)
-    
     try:
-        while step < OPTUNA_CONFIG["max_steps_per_trial"]:
+        while step < CONFIG["max_steps"]:
             elapsed_h = (time.time() - t0) / 3600
-            if elapsed_h * 3600 > OPTUNA_CONFIG["max_walltime_s_per_trial"]:
-                print(f"[T{trial.number}][TIME] Reached 24h limit")
+            if elapsed_h > CONFIG["max_hours"]:
+                print(f"[TIME] Reached {CONFIG['max_hours']}h limit")
                 break
             
-            # ==================== ROLLOUT (identical to optimal) ====================
             for t in range(rollout_len):
                 rgb = obs_dict["rgb"].to(device)
                 imu = obs_dict["imu"].to(device)
+                
+                # =============================================
+                # ADD SENSOR NOISE (domain randomization)
+                # =============================================
+                rgb, imu = add_sensor_noise(rgb, imu, CONFIG)
+                
                 priv = obs_dict.get("privileged")
                 if priv is not None:
                     priv = priv.to(device)
@@ -414,6 +415,7 @@ def objective(trial, env, base_log_dir):
                 with torch.no_grad():
                     action, logp, value, _ = policy.act(rgb, imu, priv)
                 
+                # Store NOISY observations in buffer (policy learns from noisy data)
                 rgb_buf[t] = rgb
                 imu_buf[t] = imu
                 actions_buf[t] = action
@@ -436,17 +438,18 @@ def objective(trial, env, base_log_dir):
                         succ = env._last_success.float()
                     else:
                         _, _, sxy, _ = env.get_sphere_distances_from_physics()
-                        succ = (sxy < OPTUNA_CONFIG["success_surface_xy"]).float()
+                        succ = (sxy < 0.03).float()
                     ep_rewards.extend(cur_reward[done_idx].cpu().tolist())
                     stage_successes.extend(succ[done_idx].cpu().tolist())
                     cur_reward[done_idx] = 0
                 
                 step += num_envs
             
-            # ==================== GAE + PPO UPDATE (identical to optimal) ====================
             with torch.no_grad():
                 last_rgb = obs_dict["rgb"].to(device)
                 last_imu = obs_dict["imu"].to(device)
+                # Add noise to last observation too
+                last_rgb, last_imu = add_sensor_noise(last_rgb, last_imu, CONFIG)
                 last_priv = obs_dict.get("privileged")
                 if last_priv is not None:
                     last_priv = last_priv.to(device)
@@ -454,25 +457,25 @@ def objective(trial, env, base_log_dir):
             
             advantages, returns = compute_gae(
                 rewards_buf, values_buf, dones_buf,
-                cfg["gamma"], cfg["gae_lambda"], last_value
+                CONFIG["gamma"], CONFIG["gae_lambda"], last_value
             )
             
             metrics = ppo_update_with_yaw(
                 policy, optimizer, rgb_buf, imu_buf, actions_buf, logprobs_buf,
                 advantages, returns, yaw_targets_buf,
-                priv_buf if has_privileged else None, cfg
+                priv_buf if has_privileged else None, CONFIG
             )
             
             ssr = float(np.mean(stage_successes)) if stage_successes else 0.0
             mean_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
             
-            # ==================== CURRICULUM (identical to optimal) ====================
+            # Curriculum advancement
             if (len(stage_successes) >= 100 and
-                ssr >= cfg["advance_threshold"] and
-                step - last_advance_step >= cfg["min_steps_before_advance"] and
-                current_stage < cfg["max_stage"]):
+                ssr >= CONFIG["advance_threshold"] and
+                step - last_advance_step >= CONFIG["min_steps_before_advance"] and
+                current_stage < CONFIG["max_stage"]):
                 
-                print(f"[T{trial.number}][ADVANCE] Stage {current_stage} -> {current_stage + 1} (SSR={ssr:.1%})")
+                print(f"[ADVANCE] Stage {current_stage} -> {current_stage + 1} (SSR={ssr:.1%})")
                 current_stage += 1
                 max_stage_reached = max(max_stage_reached, current_stage)
                 env.set_curriculum_level(current_stage)
@@ -482,12 +485,13 @@ def objective(trial, env, base_log_dir):
                 if writer:
                     writer.add_scalar("curriculum/stage", current_stage, step)
             
-            # ==================== LOGGING (identical to optimal) ====================
+            # Logging
             if step >= next_log:
-                print(f"[T{trial.number}][{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | R: {mean_r:.1f} | "
+                print(f"[{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | R: {mean_r:.1f} | "
                       f"YawL: {metrics['yaw_loss']:.3f} | Ent: {metrics['entropy']:.3f} | "
                       f"MaxS: {max_stage_reached} | {elapsed_h:.1f}h")
                 
+                # TensorBoard
                 if writer:
                     writer.add_scalar("train/ssr", ssr, step)
                     writer.add_scalar("train/reward", mean_r, step)
@@ -499,155 +503,71 @@ def objective(trial, env, base_log_dir):
                     writer.add_scalar("curriculum/stage", current_stage, step)
                     writer.add_scalar("curriculum/max_stage", max_stage_reached, step)
                 
-                if csv_writer:
-                    csv_writer.writerow([step, current_stage, f"{ssr:.4f}", f"{mean_r:.2f}",
-                                        f"{metrics['entropy']:.4f}", f"{metrics['yaw_loss']:.4f}",
-                                        f"{metrics['policy_loss']:.4f}", f"{metrics['value_loss']:.4f}",
-                                        f"{elapsed_h:.2f}"])
-                    csv_file.flush()
+                # CSV
+                csv_writer.writerow([step, current_stage, f"{ssr:.4f}", f"{mean_r:.2f}",
+                                    f"{metrics['entropy']:.4f}", f"{metrics['yaw_loss']:.4f}",
+                                    f"{metrics['policy_loss']:.4f}", f"{metrics['value_loss']:.4f}",
+                                    f"{elapsed_h:.2f}"])
+                csv_file.flush()
                 
-                # Report to Optuna
-                trial.report(max_stage_reached, step)
-                
-                next_log += cfg["log_interval"]
+                next_log += CONFIG["log_interval"]
             
-            # ==================== PRUNING (Optuna-specific) ====================
-            if OPTUNA_CONFIG["pruning_enabled"] and step >= next_prune_check:
-                if should_prune(step, max_stage_reached):
-                    print(f"[T{trial.number}][PRUNE] at step {step:,} with max_stage={max_stage_reached}")
-                    raise optuna.TrialPruned()
-                next_prune_check += OPTUNA_CONFIG["pruning_check_interval"]
-            
-            # ==================== CHECKPOINT (identical to optimal) ====================
+            # Save checkpoint
             if step >= next_save:
-                ckpt_path = f"/home/schux00/checkpoints/optuna_v3_T{trial.number}_S{current_stage}_{step//1000}k.pt"
+                ckpt_path = f"/home/schux00/checkpoints/vision_optimal_noisy_S{current_stage}_{step//1000}k.pt"
                 os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 torch.save({
-                    "trial": trial.number,
                     "step": step,
                     "stage": current_stage,
                     "max_stage": max_stage_reached,
                     "policy": policy.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    "config": cfg,
+                    "config": CONFIG,
                 }, ckpt_path)
-                print(f"[T{trial.number}][SAVE] {ckpt_path}")
-                next_save += cfg["save_interval"]
+                print(f"[SAVE] {ckpt_path}")
+                next_save += CONFIG["save_interval"]
             
-            # ==================== EARLY SUCCESS ====================
-            if current_stage >= cfg["max_stage"] and ssr >= 0.70:
+            # Early success
+            if current_stage >= CONFIG["max_stage"] and ssr >= 0.70:
                 print("=" * 70)
-                print(f"[T{trial.number}][SUCCESS] Reached Stage {cfg['max_stage']} with SSR={ssr:.1%}!")
+                print(f"[SUCCESS] Reached Stage {CONFIG['max_stage']} with SSR={ssr:.1%}!")
                 print("=" * 70)
                 break
     
-    except optuna.TrialPruned:
-        raise
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED]")
     except Exception as e:
-        print(f"[T{trial.number}][ERROR] {repr(e)}")
+        print(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
-        raise optuna.TrialPruned()
     
     finally:
-        env.set_curriculum_level(0)
-        
         # Final save
-        final_path = f"/home/schux00/checkpoints/optuna_v3_T{trial.number}_FINAL_S{max_stage_reached}.pt"
+        final_path = f"/home/schux00/checkpoints/vision_optimal_noisy_FINAL_S{max_stage_reached}.pt"
         torch.save({
-            "trial": trial.number,
             "step": step,
             "stage": current_stage,
             "max_stage": max_stage_reached,
             "policy": policy.state_dict(),
-            "config": cfg,
+            "config": CONFIG,
         }, final_path)
-        print(f"[T{trial.number}][FINAL] Saved to {final_path}")
+        print(f"[FINAL] Saved to {final_path}")
+        print(f"[DONE] MaxStage={max_stage_reached}, Steps={step:,}, Time={(time.time()-t0)/3600:.1f}h")
         
         if writer:
-            writer.add_hparams(
-                {"lr": learning_rate, "entropy": entropy_coef, "gae_lambda": gae_lambda,
-                 "epochs": epochs, "batch_size": batch_size, "aux_yaw": aux_yaw_coef},
-                {"hparam/max_stage": max_stage_reached}
-            )
             writer.close()
-        
-        if csv_file:
-            csv_file.close()
-    
-    print(f"[T{trial.number}][DONE] MaxStage={max_stage_reached}, Steps={step:,}, Time={(time.time()-t0)/3600:.1f}h")
-    return float(max_stage_reached)
-
-
-# =============================================================================
-# WORKER
-# =============================================================================
-def run_worker(args):
-    torch.backends.cudnn.benchmark = True
-    seed = args.seed + int(time.time()) % 1000
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    
-    app = AppLauncher(args)
-    sim = app.app
-    
-    sys.path.insert(0, "/workspace/teko/source/teko")
-    from teko.tasks.direct.teko.teko_env_tiled_imu import TekoEnvTiledIMU
-    from teko.tasks.direct.teko.teko_env_cfg import TekoEnvCfg
-    
-    cfg = TekoEnvCfg()
-    cfg.scene.num_envs = FIXED_PARAMS["num_envs"]
-    cfg.enable_curriculum = True
-    cfg.asymmetric_critic = True
-    
-    env = TekoEnvTiledIMU(cfg=cfg)
-    
-    # SQLite storage
-    storage = OPTUNA_CONFIG["storage_path"]
-    os.makedirs(os.path.dirname(storage.replace("sqlite:///", "")), exist_ok=True)
-    
-    # NSGA-II sampler (genetic algorithm)
-    study = optuna.create_study(
-        study_name=OPTUNA_CONFIG["study_name"],
-        storage=storage,
-        direction="maximize",
-        load_if_exists=True,
-        sampler=optuna.samplers.NSGAIISampler(population_size=20, seed=seed),
-        pruner=optuna.pruners.NopPruner(),  # Custom pruning via should_prune()
-    )
-    
-    # TensorBoard base directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_log_dir = f"/home/schux00/tensorboard/vision_optuna_v3_{timestamp}"
-    os.makedirs(base_log_dir, exist_ok=True)
-    
-    print("=" * 70)
-    print("TEKO Vision Optuna v3 - SQLite + NSGA-II + Single Objective")
-    print("=" * 70)
-    print(f"Host: {socket.gethostname()} | Seed: {seed}")
-    print(f"Storage: {storage}")
-    print(f"Dashboard: optuna-dashboard {storage}")
-    print(f"TensorBoard: {base_log_dir}")
-    print(f"Trials so far: {len(study.trials)}")
-    print("=" * 70)
-    
-    try:
-        while len(study.trials) < OPTUNA_CONFIG["target_total_trials"]:
-            study.optimize(lambda tr: objective(tr, env, base_log_dir), n_trials=1)
-    finally:
+        csv_file.close()
         env.close()
         sim.close()
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=42)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.headless = True
     args.enable_cameras = True
-    run_worker(args)
+    train(args)
 
 
 if __name__ == "__main__":

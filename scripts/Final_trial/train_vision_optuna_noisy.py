@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-TEKO Vision + Attention + YawAux - Optuna v3 (SQLite + NSGA-II)
-===============================================================
+TEKO Vision + Attention + YawAux - Optuna with NOISE v3 (SQLite + NSGA-II)
+==========================================================================
 Single objective: maximize max_stage reached
+WITH domain randomization (sensor noise) for robust sim-to-real.
 SQLite storage for Optuna Dashboard compatibility.
 NSGA-II genetic algorithm sampler.
 
@@ -44,11 +45,11 @@ from isaaclab.app import AppLauncher
 print = partial(print, flush=True)
 
 # =============================================================================
-# CONFIGURATION v3 - SQLite + Single Objective + NSGA-II
+# CONFIGURATION v3 NOISY - SQLite + Single Objective + NSGA-II + NOISE
 # =============================================================================
 OPTUNA_CONFIG = {
-    "study_name": "teko_vision_final_v3",
-    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v3.db",
+    "study_name": "teko_vision_final_v3_noisy",  # NEW study name
+    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v3_noisy.db",  # NEW database
     "target_total_trials": 1000,
     "max_steps_per_trial": 200_000_000,
     "max_walltime_s_per_trial": 24 * 3600,  # 24h per trial
@@ -67,7 +68,7 @@ OPTUNA_CONFIG = {
     "success_surface_xy": 0.03,
 }
 
-# Fixed params (same as optimal config)
+# Fixed params (same as optimal config) + NOISE
 FIXED_PARAMS = {
     "gamma": 0.99,
     "value_coef": 0.5,
@@ -80,6 +81,10 @@ FIXED_PARAMS = {
     "max_stage": 41,
     "log_interval": 50_000,
     "save_interval": 2_000_000,
+    
+    # NOISE / DOMAIN RANDOMIZATION
+    "rgb_noise_std": 0.03,      # Gaussian noise std for RGB (pixel values 0-1)
+    "imu_noise_std": 0.02,      # Gaussian noise std for IMU
 }
 
 
@@ -93,6 +98,31 @@ def should_prune(step, max_stage):
             if max_stage < schedule[step_threshold]:
                 return True
     return False
+
+
+def add_sensor_noise(rgb, imu, cfg):
+    """
+    Add Gaussian noise to RGB and IMU observations for domain randomization.
+    
+    Args:
+        rgb: [N, C, H, W] tensor (values assumed in range [0, 1])
+        imu: [N, 6] tensor
+        cfg: config dict with noise parameters
+    
+    Returns:
+        rgb_noisy, imu_noisy
+    """
+    # RGB noise
+    if cfg.get("rgb_noise_std", 0) > 0:
+        rgb_noise = torch.randn_like(rgb) * cfg["rgb_noise_std"]
+        rgb = torch.clamp(rgb + rgb_noise, 0.0, 1.0)
+    
+    # IMU noise
+    if cfg.get("imu_noise_std", 0) > 0:
+        imu_noise = torch.randn_like(imu) * cfg["imu_noise_std"]
+        imu = imu + imu_noise
+    
+    return rgb, imu
 
 
 # =============================================================================
@@ -347,7 +377,7 @@ def objective(trial, env, base_log_dir):
         os.makedirs(trial_log_dir, exist_ok=True)
         writer = SummaryWriter(trial_log_dir)
     
-    csv_path = f"/home/schux00/logs/optuna_v3_T{trial.number}_{timestamp}.csv"
+    csv_path = f"/home/schux00/logs/optuna_v3_noisy_T{trial.number}_{timestamp}.csv"
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     csv_file = open(csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
@@ -385,12 +415,13 @@ def objective(trial, env, base_log_dir):
     has_privileged = "privileged" in obs_dict and obs_dict["privileged"] is not None
     
     print("=" * 70)
-    print(f"[TRIAL {trial.number}] TEKO Vision Optuna v3 - NSGA-II")
+    print(f"[TRIAL {trial.number}] TEKO Vision Optuna v3 NOISY - NSGA-II")
     print("=" * 70)
     print(f"Host: {socket.gethostname()}")
     print(f"LR: {cfg['learning_rate']:.6f} | Entropy: {cfg['entropy_coef']:.4f}")
     print(f"GAE Lambda: {cfg['gae_lambda']:.2f} | Batch: {cfg['batch_size']}")
     print(f"Epochs: {cfg['epochs']} | YawAux: {cfg['aux_yaw_coef']:.2f}")
+    print(f"RGB Noise: {cfg['rgb_noise_std']} | IMU Noise: {cfg['imu_noise_std']}")
     print("=" * 70)
     
     try:
@@ -400,10 +431,14 @@ def objective(trial, env, base_log_dir):
                 print(f"[T{trial.number}][TIME] Reached 24h limit")
                 break
             
-            # ==================== ROLLOUT (identical to optimal) ====================
+            # ==================== ROLLOUT with NOISE ====================
             for t in range(rollout_len):
                 rgb = obs_dict["rgb"].to(device)
                 imu = obs_dict["imu"].to(device)
+                
+                # ADD SENSOR NOISE (domain randomization)
+                rgb, imu = add_sensor_noise(rgb, imu, cfg)
+                
                 priv = obs_dict.get("privileged")
                 if priv is not None:
                     priv = priv.to(device)
@@ -414,6 +449,7 @@ def objective(trial, env, base_log_dir):
                 with torch.no_grad():
                     action, logp, value, _ = policy.act(rgb, imu, priv)
                 
+                # Store NOISY observations in buffer
                 rgb_buf[t] = rgb
                 imu_buf[t] = imu
                 actions_buf[t] = action
@@ -443,10 +479,12 @@ def objective(trial, env, base_log_dir):
                 
                 step += num_envs
             
-            # ==================== GAE + PPO UPDATE (identical to optimal) ====================
+            # ==================== GAE + PPO UPDATE ====================
             with torch.no_grad():
                 last_rgb = obs_dict["rgb"].to(device)
                 last_imu = obs_dict["imu"].to(device)
+                # Add noise to last observation too
+                last_rgb, last_imu = add_sensor_noise(last_rgb, last_imu, cfg)
                 last_priv = obs_dict.get("privileged")
                 if last_priv is not None:
                     last_priv = last_priv.to(device)
@@ -466,7 +504,7 @@ def objective(trial, env, base_log_dir):
             ssr = float(np.mean(stage_successes)) if stage_successes else 0.0
             mean_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
             
-            # ==================== CURRICULUM (identical to optimal) ====================
+            # ==================== CURRICULUM ====================
             if (len(stage_successes) >= 100 and
                 ssr >= cfg["advance_threshold"] and
                 step - last_advance_step >= cfg["min_steps_before_advance"] and
@@ -482,7 +520,7 @@ def objective(trial, env, base_log_dir):
                 if writer:
                     writer.add_scalar("curriculum/stage", current_stage, step)
             
-            # ==================== LOGGING (identical to optimal) ====================
+            # ==================== LOGGING ====================
             if step >= next_log:
                 print(f"[T{trial.number}][{step:,}] S{current_stage:02d} | SSR: {ssr:.1%} | R: {mean_r:.1f} | "
                       f"YawL: {metrics['yaw_loss']:.3f} | Ent: {metrics['entropy']:.3f} | "
@@ -518,9 +556,9 @@ def objective(trial, env, base_log_dir):
                     raise optuna.TrialPruned()
                 next_prune_check += OPTUNA_CONFIG["pruning_check_interval"]
             
-            # ==================== CHECKPOINT (identical to optimal) ====================
+            # ==================== CHECKPOINT ====================
             if step >= next_save:
-                ckpt_path = f"/home/schux00/checkpoints/optuna_v3_T{trial.number}_S{current_stage}_{step//1000}k.pt"
+                ckpt_path = f"/home/schux00/checkpoints/optuna_v3_noisy_T{trial.number}_S{current_stage}_{step//1000}k.pt"
                 os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
                 torch.save({
                     "trial": trial.number,
@@ -553,7 +591,7 @@ def objective(trial, env, base_log_dir):
         env.set_curriculum_level(0)
         
         # Final save
-        final_path = f"/home/schux00/checkpoints/optuna_v3_T{trial.number}_FINAL_S{max_stage_reached}.pt"
+        final_path = f"/home/schux00/checkpoints/optuna_v3_noisy_T{trial.number}_FINAL_S{max_stage_reached}.pt"
         torch.save({
             "trial": trial.number,
             "step": step,
@@ -603,7 +641,7 @@ def run_worker(args):
     
     env = TekoEnvTiledIMU(cfg=cfg)
     
-    # SQLite storage
+    # SQLite storage - NEW DATABASE FOR NOISY
     storage = OPTUNA_CONFIG["storage_path"]
     os.makedirs(os.path.dirname(storage.replace("sqlite:///", "")), exist_ok=True)
     
@@ -619,16 +657,17 @@ def run_worker(args):
     
     # TensorBoard base directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_log_dir = f"/home/schux00/tensorboard/vision_optuna_v3_{timestamp}"
+    base_log_dir = f"/home/schux00/tensorboard/vision_optuna_v3_noisy_{timestamp}"
     os.makedirs(base_log_dir, exist_ok=True)
     
     print("=" * 70)
-    print("TEKO Vision Optuna v3 - SQLite + NSGA-II + Single Objective")
+    print("TEKO Vision Optuna v3 NOISY - SQLite + NSGA-II + Single Objective")
     print("=" * 70)
     print(f"Host: {socket.gethostname()} | Seed: {seed}")
     print(f"Storage: {storage}")
     print(f"Dashboard: optuna-dashboard {storage}")
     print(f"TensorBoard: {base_log_dir}")
+    print(f"RGB Noise: {FIXED_PARAMS['rgb_noise_std']} | IMU Noise: {FIXED_PARAMS['imu_noise_std']}")
     print(f"Trials so far: {len(study.trials)}")
     print("=" * 70)
     
