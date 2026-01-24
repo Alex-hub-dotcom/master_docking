@@ -23,7 +23,7 @@ from isaaclab.sensors import TiledCamera, TiledCameraCfg
 
 from .teko_env_cfg import TekoEnvCfg
 from .rewards.reward_functions import compute_total_reward
-from .curriculum.curriculum_manager import (
+from .curriculum.curriculum_teko import (
     reset_environment_curriculum,
     set_curriculum_level,
 )
