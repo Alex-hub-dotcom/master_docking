@@ -62,3 +62,7 @@ Thumbs.db
 _cam_out/
 *.mp4
 *.avi
+
+# ignore thesis backups
+documents/writing_backup/
+*.zip
