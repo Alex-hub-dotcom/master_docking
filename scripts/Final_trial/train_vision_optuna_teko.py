@@ -13,7 +13,7 @@ Changes from v3:
 - max_stage: 41 → 49
 - Pruning schedule updated for 50 stages
 - Uses curriculum_teko.py and reward_teko.py
-- New database: teko_vision_final_v4.db
+- New database: teko_vision_final_v5.db
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -58,11 +58,11 @@ print = partial(print, flush=True)
 # =============================================================================
 OPTUNA_CONFIG = {
     # NEW database for fresh start
-    "study_name": "teko_vision_final_v4",
-    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v4.db",
+    "study_name": "teko_vision_final_v5",
+    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v5.db",
     "target_total_trials": 1000,
     "max_steps_per_trial": 300_000_000,  # Increased for 50 stages
-    "max_walltime_s_per_trial": 72 * 3600,  # 72h per trial (more stages)
+    "max_walltime_s_per_trial": 120 * 3600,  # 72h per trial (more stages)
     
     # Pruning config - UPDATED for 50 stages
     "pruning_enabled": True,
@@ -76,6 +76,9 @@ OPTUNA_CONFIG = {
         100_000_000: 32,
         150_000_000: 38,
         200_000_000: 42,
+        250_000_000: 45,
+        300_000_000: 47,
+        350_000_000: 48,
     },
 }
 
@@ -565,7 +568,7 @@ def objective(trial, env, base_log_dir, get_success_threshold):
                 next_save += cfg["save_interval"]
             
             # ==================== EARLY SUCCESS ====================
-            if current_stage >= cfg["max_stage"] and ssr >= 0.75:
+            if current_stage >= cfg["max_stage"] and ssr >= 0.95:
                 print("=" * 70)
                 print(f"[T{trial.number}][SUCCESS] Reached Stage {cfg['max_stage']} with SSR={ssr:.1%}!")
                 print(f"[T{trial.number}][SUCCESS] Final threshold: {success_threshold*100:.1f}cm (1cm precision)")

@@ -64,7 +64,7 @@ def get_success_threshold(stage: int) -> float:
         return 0.030  # 3.0cm
     elif stage <= 30:
         return 0.020  # 2.0cm
-    elif stage <= 41:
+    elif stage <= 46:
         return 0.015  # 1.5cm
     else:
         return 0.010  # 1.0cm (most demanding)
@@ -241,8 +241,10 @@ def _get_replay_probability(stage: int) -> float:
         return 0.18  # micro
     elif stage <= 22:
         return 0.22  # ultra
-    elif stage <= 41:
+    elif stage <= 46:
         return 0.25  # turn
+    elif stage <= 46:
+        return 0.015  # 1.5cm
     else:
         # Search stages (from curriculum_manager_search.py)
         search_replay = {
@@ -424,10 +426,12 @@ def _reset_stage_dispatch(env, env_ids: torch.Tensor, stage: int) -> None:
         # Forward reset
         min_d, max_d = FORWARD_CONFIGS[stage]
         _forward_reset(env, env_ids, min_d, max_d)
-    elif stage <= 41:
+    elif stage <= 46:
         # Offset reset
         angle, lateral, min_d, max_d = OFFSET_CONFIGS[stage]
         _offset_reset(env, env_ids, angle, lateral, min_d, max_d)
+    elif stage <= 46:
+        return 0.015  # 1.5cm
     else:
         # Phase 2: Search stages (S42-S49)
         min_dist, max_dist, max_angle = SEARCH_CONFIGS[stage]
@@ -510,7 +514,7 @@ def get_stage_info(stage: int) -> dict:
             "angle_deg": 0.0,
             "lateral_m": 0.0,
         })
-    elif stage <= 41:
+    elif stage <= 46:
         # Offset stage
         angle, lateral, min_d, max_d = OFFSET_CONFIGS[stage]
         info.update({
@@ -520,6 +524,8 @@ def get_stage_info(stage: int) -> dict:
             "angle_deg": angle,
             "lateral_m": lateral,
         })
+    elif stage <= 46:
+        return 0.015  # 1.5cm
     else:
         # Search stage
         min_dist, max_dist, max_angle = SEARCH_CONFIGS[stage]
