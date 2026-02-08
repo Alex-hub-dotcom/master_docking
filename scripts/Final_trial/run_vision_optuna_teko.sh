@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=55G
 #SBATCH --time=30-00:00:00
-#SBATCH --array=0-6
+#SBATCH --array=0-7
 #SBATCH --output=/home/schux00/logs/optuna_v4_%A_%a.out
 #SBATCH --error=/home/schux00/logs/optuna_v4_%A_%a.err
 

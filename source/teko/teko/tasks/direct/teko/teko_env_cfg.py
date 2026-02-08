@@ -117,7 +117,7 @@ class TekoEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot/teko_urdf/TEKO_Body/TEKO_WallBack/TEKO_Camera/RearCamera",
         offset=TiledCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            rot=(0.7071, 0.0, 0.7071, 0.0),
             convention="world",
         ),
         data_types=["rgb"],

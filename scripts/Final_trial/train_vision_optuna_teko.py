@@ -13,7 +13,7 @@ Changes from v3:
 - max_stage: 41 → 49
 - Pruning schedule updated for 50 stages
 - Uses curriculum_teko.py and reward_teko.py
-- New database: teko_vision_final_v5.db
+- New database: teko_vision_final_v10.db
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -58,8 +58,8 @@ print = partial(print, flush=True)
 # =============================================================================
 OPTUNA_CONFIG = {
     # NEW database for fresh start
-    "study_name": "teko_vision_final_v5",
-    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v5.db",
+    "study_name": "teko_vision_final_v10",
+    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v10.db",
     "target_total_trials": 1000,
     "max_steps_per_trial": 300_000_000,  # Increased for 50 stages
     "max_walltime_s_per_trial": 120 * 3600,  # 72h per trial (more stages)
@@ -90,7 +90,7 @@ FIXED_PARAMS = {
     "clip_ratio": 0.2,
     "num_envs": 120,
     "rollout_len": 128,
-    "advance_threshold": 0.75,
+    "advance_threshold": 0.85,
     "min_steps_before_advance": 200_000,
     "max_stage": 49,  # UPDATED: 50 stages (0-49)
     "log_interval": 50_000,

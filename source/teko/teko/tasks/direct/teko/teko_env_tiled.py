@@ -227,8 +227,20 @@ class TekoEnvTiled(DirectRLEnv):
             self.goal_positions[env_idx] = origin + local_goal
         print(f"[INFO] Cached {num_envs} goal positions.")
 
+
+    @staticmethod
+    def _quat_rotate_vec(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+        """Rotate vector(s) by quaternion(s). Quat format: [x, y, z, w] (Isaac Lab convention)."""
+        if vec.dim() == 1:
+            v = vec.unsqueeze(0).expand(quat.shape[0], 3)
+        else:
+            v = vec
+        q_xyz = quat[:, :3]
+        q_w = quat[:, 3:4]
+        t = 2.0 * torch.cross(q_xyz, v, dim=-1)
+        return v + q_w * t + torch.cross(q_xyz, t, dim=-1)
     def get_sphere_distances_from_physics(self):
-        """Compute connector distances."""
+        """Compute connector distances with correct offsets and rotation."""
         FEMALE_OFFSET = torch.tensor([0.24, 0.0, -0.08], device=self.device)
         MALE_OFFSET = torch.tensor([-0.22667, -0.00144, -0.08815], device=self.device)
 
