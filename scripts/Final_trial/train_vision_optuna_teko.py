@@ -68,6 +68,7 @@ OPTUNA_CONFIG = {
     "pruning_enabled": True,
     "pruning_warmup_steps": 2_000_000,
     "pruning_check_interval": 500_000,
+    "stagnation_limit_steps": 30_000_000,  # Prune if stuck at same stage for 30M steps
     "min_stage_schedule": {
         10_000_000: 5,
         20_000_000: 10,
@@ -83,6 +84,7 @@ OPTUNA_CONFIG = {
 }
 
 # Fixed params
+ENTROPY_FLOOR = 0.5  # Minimum entropy to prevent policy collapse
 FIXED_PARAMS = {
     "gamma": 0.99,
     "value_coef": 0.5,
@@ -90,7 +92,7 @@ FIXED_PARAMS = {
     "clip_ratio": 0.2,
     "num_envs": 120,
     "rollout_len": 128,
-    "advance_threshold": 0.85,
+    "advance_threshold": 0.80,
     "min_steps_before_advance": 200_000,
     "max_stage": 49,  # UPDATED: 50 stages (0-49)
     "log_interval": 50_000,
@@ -301,7 +303,11 @@ def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantag
             v_loss = 0.5 * F.mse_loss(val, ret_flat[mb])
             yaw_loss = F.mse_loss(yaw_pred, yaw_flat[mb])
             
-            loss = p_loss + cfg["value_coef"] * v_loss - cfg["entropy_coef"] * ent.mean() + cfg["aux_yaw_coef"] * yaw_loss
+            ent_mean = ent.mean()
+            entropy_loss = -cfg["entropy_coef"] * ent_mean
+            if ent_mean.item() < ENTROPY_FLOOR:
+                entropy_loss -= 0.5 * (ENTROPY_FLOOR - ent_mean)
+            loss = p_loss + cfg["value_coef"] * v_loss + entropy_loss + cfg["aux_yaw_coef"] * yaw_loss
             
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -390,6 +396,7 @@ def objective(trial, env, base_log_dir, get_success_threshold):
     current_stage = 0
     max_stage_reached = 0
     last_advance_step = 0
+    last_stage_change_step = 0
     
     obs_dict, _ = env.reset()
     step = 0
@@ -508,6 +515,7 @@ def objective(trial, env, base_log_dir, get_success_threshold):
                 
                 stage_successes.clear()
                 last_advance_step = step
+                last_stage_change_step = step
                 
                 if writer:
                     writer.add_scalar("curriculum/stage", current_stage, step)
@@ -545,6 +553,10 @@ def objective(trial, env, base_log_dir, get_success_threshold):
             
             # ==================== PRUNING ====================
             if OPTUNA_CONFIG["pruning_enabled"] and step >= next_prune_check:
+                # Stagnation check
+                if step - last_stage_change_step > OPTUNA_CONFIG["stagnation_limit_steps"]:
+                    print(f"[T{trial.number}][STAGNATION] Stuck at S{current_stage} for {(step-last_stage_change_step)//1_000_000}M steps")
+                    raise optuna.TrialPruned()
                 if should_prune(step, max_stage_reached):
                     print(f"[T{trial.number}][PRUNE] at step {step:,} with max_stage={max_stage_reached}")
                     raise optuna.TrialPruned()

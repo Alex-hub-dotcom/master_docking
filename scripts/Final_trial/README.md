@@ -1,60 +1,60 @@
-# TEKO Final Experiments
+# TEKO files. How to use them.
 
-## Objetivo
+## Objective
 
-Experimentos finais para a tese comparando:
-1. **Vision Optimal** - Policy com hyperparâmetros óptimos do Trial 80
-2. **Vision Optuna** - Busca de hyperparâmetros para gráficos comparativos
-3. **State Full** - Baseline oracle com informação completa
+Final experiments for the thesis, comparing:
+1. **Vision Optimal** - Policy with optimal hyperparameters
+2. **Vision Optuna** - Seach for hyperparameter combinations for grafical comparison
+3. **State Full** - Baseline oracle with full information
 
-## Estrutura
+## Structure
 
 ```
 Final_trial/
-├── train_vision_optimal.py    # Vision com hyperparâmetros Trial 80
-├── train_vision_optuna.py     # Optuna search (novo study v2)
-├── train_state_full.py        # State com info completa ao actor
+├── train_vision_optimal.py    # Vision with static hyperparameter
+├── train_vision_optuna.py     # Optuna search 
+├── train_state_full.py        # State with full information
 ├── run_vision_optimal.sh      # SLURM script
-├── run_vision_optuna.sh       # SLURM script (array 0-2)
+├── run_vision_optuna.sh       # SLURM script 
 ├── run_state_full.sh          # SLURM script
-├── launch_all.sh              # Lança todos os experimentos
-└── README.md                  # Este ficheiro
+├── launch_all.sh              # Launch all experiments
+└── README.md                  # This file
 ```
 
-## Hyperparâmetros Óptimos (Trial 80)
+## Hyperparameters
 
-| Parâmetro | Valor |
-|-----------|-------|
-| learning_rate | 0.000162 |
-| entropy_coef | 0.00622 |
-| gae_lambda | 0.9396 |
-| batch_size | 1024 |
-| epochs | 5 |
-| aux_yaw_coef | 0.308 |
+| Parameter     | Value   |
+|---------------|---------|
+| learning_rate | 0.000162|
+| entropy_coef  | 0.00622 |
+| gae_lambda    | 0.9396  |
+| batch_size    | 1024    |
+| epochs        | 5       |
+| aux_yaw_coef  | 0.308   |
 
-## Por que o State pode chegar a S41?
+## Why can the State model reach S41?
 
-O State original só dava informação privilegiada (dx, dy, dz, yaw_err) ao **CRITIC**.
-O actor só recebia IMU (velocidades).
+The original State setup only provided privileged information (dx, dy, dz, yaw_err) to the CRITIC.
+The actor only received IMU data (velocities).
 
-**Problema:** Sem saber onde está o alvo, o actor não consegue fazer docking >90°.
+**Problema:** Without knowing where the target is, the actor cannot dock from approach angles >90°.
 
-**Solução (State Full):** Dar informação completa ao **ACTOR**:
-- Estado: 10D [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
-- O actor "sabe" onde está o alvo mesmo sem ver
+**Solução (State Full):** Provide full information to the ACTOR:
+- State: 10D [dx, dy, dz, yaw_err, vx, vy, vz, wx, wy, wz]
+- The actor "knows" where the target is even without seeing it
 
-Isto serve como **baseline oracle** para provar que a tarefa É solucionável.
-O Vision Optimal igualar este resultado = contribuição da tese!
+This serves as a **baseline oracle** to prove the task is solvable.
+If Vision Optimal matches this result, that becomes the thesis contribution!
 
-## Comparação Esperada
+## Expected Comparison
 
-| Modelo | Max Stage | Info ao Actor | Tempo |
-|--------|-----------|---------------|-------|
-| State Full | S41 (180°) | Completa (10D) | ~6-12h |
-| Vision Optimal | S41 (180°) | Câmera + IMU | ~7-10h |
-| State IMU (antigo) | S27 (75°) | Só IMU (6D) | ~10h |
+| Model         | Max Stage  | Actor Information |  Time  |
+|---------------|------------|-------------------|--------|
+| State Full    | S41 (180°) | Complete (10D)    | ~6-12h |
+| Vision Optimal| S41 (180°) | Camera + IMU      | ~7-10h |
+| Vision Optuna | S27 (75°)  | Camera + IMU      | ~10h   |
 
-## Logging
+## Logging CONFIRM TJHIS PART !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 ### TensorBoard
 ```bash
