@@ -2,7 +2,7 @@
 """
 TEKO Environment with TiledCamera for Efficient Rendering
 ==========================================================
-
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env_tiled.py
 Uses TiledCamera instead of individual cameras for better GPU memory efficiency.
 Supports 150+ parallel environments on RTX 3090.
 
@@ -22,7 +22,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import TiledCamera, TiledCameraCfg
 
 from .teko_env_cfg import TekoEnvCfg
-from .rewards.reward_functions import compute_total_reward
+from .rewards.reward_teko import compute_total_reward
 from .curriculum.curriculum_teko import (
     reset_environment_curriculum,
     set_curriculum_level,
@@ -372,7 +372,8 @@ class TekoEnvTiled(DirectRLEnv):
         min_success_steps = 5
         min_collision_steps = 10
 
-        raw_success = surface_xy < 0.03
+        success_thresh = getattr(self, "_success_threshold", 0.03)
+        raw_success = surface_xy < success_thresh
         success = raw_success & (self.episode_length_buf >= min_success_steps)
 
         robot_pos_global = self.robot.data.root_pos_w

@@ -2,7 +2,7 @@
 """
 TEKO UNIFIED CURRICULUM - Final Version (50 Stages)
 ====================================================
-
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/curriculum/curriculum_teko.py
 Combines:
 - S0-S41:  Precision docking (original 42 stages) - EXACT same logic
 - S42-S49: Arena-wide search (8 stages) - EXACT same logic
@@ -446,6 +446,7 @@ def reset_environment_curriculum(env, env_ids: torch.Tensor) -> None:
     at previous stage configurations.
     """
     current_stage = int(env.curriculum_level)
+    env._success_threshold = get_success_threshold(current_stage)
     num = len(env_ids)
 
     if current_stage == 0:
@@ -470,6 +471,7 @@ def set_curriculum_level(env, level: int) -> None:
     max_level = len(STAGE_NAMES) - 1
     level = max(0, min(max_level, int(level)))
     env.curriculum_level = level
+    env._success_threshold = get_success_threshold(level)
     
     threshold = get_success_threshold(level)
     replay_prob = _get_replay_probability(level)

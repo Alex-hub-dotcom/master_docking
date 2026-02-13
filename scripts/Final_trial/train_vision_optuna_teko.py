@@ -2,7 +2,7 @@
 """
 TEKO Vision Optuna - FINAL VERSION (50 Stages + Progressive Tolerance)
 =======================================================================
-
+/home/schux00/teko/scripts/Final_trial/train_vision_optuna_teko.py
 Unified training script combining:
 - 50-stage curriculum (S0-S41 precision + S42-S49 search)
 - Progressive tolerance (3cm → 2cm → 1.5cm → 1cm)
@@ -58,33 +58,33 @@ print = partial(print, flush=True)
 # =============================================================================
 OPTUNA_CONFIG = {
     # NEW database for fresh start
-    "study_name": "teko_vision_final_v10",
+    "study_name": "teko_vision_final_v12",
     "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v10.db",
     "target_total_trials": 1000,
     "max_steps_per_trial": 300_000_000,  # Increased for 50 stages
-    "max_walltime_s_per_trial": 120 * 3600,  # 72h per trial (more stages)
+    "max_walltime_s_per_trial": 120 * 3600,  # 120h per trial (more stages)
     
     # Pruning config - UPDATED for 50 stages
     "pruning_enabled": True,
-    "pruning_warmup_steps": 2_000_000,
+    "pruning_warmup_steps": 5_000_000,
     "pruning_check_interval": 500_000,
     "stagnation_limit_steps": 30_000_000,  # Prune if stuck at same stage for 30M steps
     "min_stage_schedule": {
-        10_000_000: 5,
-        20_000_000: 10,
-        40_000_000: 18,
-        60_000_000: 25,
-        100_000_000: 32,
-        150_000_000: 38,
-        200_000_000: 42,
-        250_000_000: 45,
-        300_000_000: 47,
-        350_000_000: 48,
-    },
+        20_000_000: 3,
+        40_000_000: 7,
+        60_000_000: 10,
+        90_000_000: 15,
+        120_000_000: 20,
+        160_000_000: 25,
+        200_000_000: 30,
+        240_000_000: 36,
+        280_000_000: 41,
+        300_000_000: 44,
+    }
+
 }
 
 # Fixed params
-ENTROPY_FLOOR = 0.5  # Minimum entropy to prevent policy collapse
 FIXED_PARAMS = {
     "gamma": 0.99,
     "value_coef": 0.5,
@@ -92,7 +92,7 @@ FIXED_PARAMS = {
     "clip_ratio": 0.2,
     "num_envs": 120,
     "rollout_len": 128,
-    "advance_threshold": 0.80,
+    "advance_threshold": 0.75,
     "min_steps_before_advance": 200_000,
     "max_stage": 49,  # UPDATED: 50 stages (0-49)
     "log_interval": 50_000,
@@ -303,12 +303,7 @@ def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantag
             v_loss = 0.5 * F.mse_loss(val, ret_flat[mb])
             yaw_loss = F.mse_loss(yaw_pred, yaw_flat[mb])
             
-            ent_mean = ent.mean()
-            entropy_loss = -cfg["entropy_coef"] * ent_mean
-            if ent_mean.item() < ENTROPY_FLOOR:
-                entropy_loss -= 0.5 * (ENTROPY_FLOOR - ent_mean)
-            loss = p_loss + cfg["value_coef"] * v_loss + entropy_loss + cfg["aux_yaw_coef"] * yaw_loss
-            
+            loss = p_loss + cfg["value_coef"] * v_loss - cfg["entropy_coef"] * ent.mean() + cfg["aux_yaw_coef"] * yaw_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"]).item()
@@ -328,7 +323,8 @@ def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantag
 # OPTUNA OBJECTIVE
 # =============================================================================
 def objective(trial, env, base_log_dir, get_success_threshold):
-    """Single objective: maximize max_stage reached (now 0-49)."""
+    """Single objective: maximize max_stage + SSR."""
+
     
     # ==========================================================================
     # VARIABLE HYPERPARAMETERS (same ranges as before - proven to work)
@@ -547,7 +543,9 @@ def objective(trial, env, base_log_dir, get_success_threshold):
                     csv_file.flush()
                 
                 # Report to Optuna
-                trial.report(max_stage_reached, step)
+                trial.set_user_attr("max_stage", int(max_stage_reached))
+                trial.set_user_attr("ssr", float(ssr))
+                trial.set_user_attr("stage", int(current_stage))
                 
                 next_log += cfg["log_interval"]
             
@@ -623,9 +621,9 @@ def objective(trial, env, base_log_dir, get_success_threshold):
             csv_file.close()
     
     print(f"[T{trial.number}][DONE] MaxStage={max_stage_reached}, Steps={step:,}, Time={(time.time()-t0)/3600:.1f}h")
-    final_score = float(max_stage_reached) + ssr
-    print(f"[T{trial.number}][SCORE] Stage={max_stage_reached} + SSR={ssr:.1%} = {final_score:.2f}")
-    return final_score
+
+
+    return float(max_stage_reached) + ssr
 
 
 # =============================================================================
@@ -690,7 +688,7 @@ def run_worker(args):
         env.prev_distance[env_ids] = surface_xy[env_ids]
     
     env._reset_idx = patched_reset_idx
-    env.set_curriculum_level = lambda level: set_curriculum_level(env, level)
+    env.set_curriculum_level = lambda level: (set_curriculum_level(env, level), setattr(env, "_success_threshold", get_success_threshold(level)))
     
     # SQLite storage - NEW database
     storage = OPTUNA_CONFIG["storage_path"]

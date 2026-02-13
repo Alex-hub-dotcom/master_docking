@@ -2,6 +2,7 @@
 """
 TEKO Environment Configuration (TiledCamera + Frame Stacking) NOVO
 --------------------------------------------------------------
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env_cfg.py
 Optimized for:
 - TiledCamera for efficient parallel rendering
 - 84×84 grayscale observations with 4-frame stacking

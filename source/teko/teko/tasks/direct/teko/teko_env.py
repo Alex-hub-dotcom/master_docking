@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment - Curriculum Compatible (v8.4 - GRAYSCALE 84x84)
+TEKO Environment - Curriculum Compatible (v8.4 - GRAYSCALE 128x128)
 =================================================================
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env.py
 - Supports multi-stage curriculum
 - Nuclear penalties (-500 collision/boundary)
 - Frame stacking: returns stacked grayscale frames [K, H, W]

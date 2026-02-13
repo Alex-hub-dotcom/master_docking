@@ -2,6 +2,7 @@
 """
 TEKO Reward Functions - Final Version with Progressive Tolerance
 ================================================================
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/rewards/reward_teko.py
 
 Based on reward_functions.py (v9.1) with one key addition:
 - SUCCESS THRESHOLD is now PROGRESSIVE based on curriculum stage
@@ -70,7 +71,7 @@ REWARD_CONFIG = {
     
     "boundary_penalty": -500.0,
     
-    "success_bonus": 600.0,
+    "success_bonus": 1200.0,
     # NOTE: success_distance is now DYNAMIC based on stage
     # Default fallback (used if stage not available)
     "success_distance_default": 0.03,
@@ -83,7 +84,7 @@ REWARD_CONFIG = {
     
     # Clipping
     "reward_min": -500.0,
-    "reward_max": 500.0,
+    "reward_max": 1500.0,
 }
 
 
