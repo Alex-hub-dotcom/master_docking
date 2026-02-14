@@ -649,7 +649,7 @@ def run_worker(args):
     from teko.tasks.direct.teko.curriculum.curriculum_teko import (
         reset_environment_curriculum,
         set_curriculum_level,
-        get_success_threshold,
+        get_success_threshold as _get_success_threshold,
         MAX_STAGE,
     )
     
@@ -688,13 +688,13 @@ def run_worker(args):
         env.prev_distance[env_ids] = surface_xy[env_ids]
     
     env._reset_idx = patched_reset_idx
-    env.set_curriculum_level = lambda level: (set_curriculum_level(env, level), setattr(env, "_success_threshold", get_success_threshold(level)))
+    env.set_curriculum_level = lambda level: (set_curriculum_level(env, level), setattr(env, "_success_threshold", _get_success_threshold(level)))
     
     # SQLite storage - NEW database
     storage = OPTUNA_CONFIG["storage_path"]
     os.makedirs(os.path.dirname(storage.replace("sqlite:///", "")), exist_ok=True)
     
-    # NSGA-II sampler
+    # CMA-ES sampler (evolutionary, single-objective)
     study = optuna.create_study(
         study_name=OPTUNA_CONFIG["study_name"],
         storage=storage,
@@ -722,9 +722,12 @@ def run_worker(args):
     print("=" * 70)
     
     try:
+        # Force 3cm fixed threshold (like Trial 80)
+        get_success_threshold_fixed = lambda stage: 0.03
+
         while len(study.trials) < OPTUNA_CONFIG["target_total_trials"]:
             study.optimize(
-                lambda tr: objective(tr, env, base_log_dir, get_success_threshold), 
+                lambda tr: objective(tr, env, base_log_dir, get_success_threshold_fixed), 
                 n_trials=1
             )
     finally:
