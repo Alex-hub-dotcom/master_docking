@@ -4,14 +4,9 @@ TEKO UNIFIED CURRICULUM - Final Version (50 Stages)
 ====================================================
 /home/schux00/teko/source/teko/teko/tasks/direct/teko/curriculum/curriculum_teko.py
 Combines:
-- S0-S41:  Precision docking (original 42 stages) - EXACT same logic
-- S42-S49: Arena-wide search (8 stages) - EXACT same logic
+- S0-S41:  Precision docking (original 42 stages) 
+- S42-S49: Arena-wide search (8 stages) 
 
-Progressive tolerance for more precise docking:
-- S0-S20:  3.0cm (learning basics)
-- S21-S30: 2.0cm (refinement)  
-- S31-S41: 1.5cm (precision)
-- S42-S49: 1.0cm (search + high precision)
 
 Author: Alexandre Schleier Neves da Silva
 """
@@ -54,20 +49,8 @@ SPAWN_Z = 0.40
 # =============================================================================
 
 def get_success_threshold(stage: int) -> float:
-    """
-    Get success threshold (meters) based on current stage.
     
-    Returns:
-        Threshold in meters for considering a docking successful.
-    """
-    if stage <= 20:
-        return 0.030  # 3.0cm
-    elif stage <= 30:
-        return 0.020  # 2.0cm
-    elif stage <= 41:
-        return 0.015  # 1.5cm
-    else:
-        return 0.010  # 1.0cm (most demanding)
+    return 0.030  
 
 
 # =============================================================================

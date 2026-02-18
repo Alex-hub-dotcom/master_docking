@@ -12,16 +12,16 @@
 set -euo pipefail
 
 echo "=============================================="
-echo "TEKO Vision Optuna v4 - 50 Stages FINAL"
+echo "TEKO Vision Optuna v5 - 50 Stages FINAL"
 echo "=============================================="
 echo "Job Array: ${SLURM_ARRAY_JOB_ID:-NA}"
 echo "Task ID: ${SLURM_ARRAY_TASK_ID:-NA}"
 echo "Node: ${SLURMD_NODENAME:-NA}"
 echo "Started: $(date)"
 echo ""
-echo "Database: teko_vision_final_v4.db"
+echo "Database: teko_vision_v5.db"
 echo "Stages: 50 (S0-S41 precision + S42-S49 search)"
-echo "Tolerance: 3cm -> 2cm -> 1.5cm -> 1cm"
+echo "Tolerance: fixed 2cm "
 echo "=============================================="
 
 mkdir -p /home/schux00/logs

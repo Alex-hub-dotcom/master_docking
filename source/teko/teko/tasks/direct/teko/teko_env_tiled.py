@@ -3,10 +3,12 @@
 TEKO Environment with TiledCamera for Efficient Rendering
 ==========================================================
 /home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env_tiled.py
-Uses TiledCamera instead of individual cameras for better GPU memory efficiency.
-Supports 150+ parallel environments on RTX 3090.
 
-Author: Alexandre Schleier Neves da Silva
+Uses TiledCamera instead of individual cameras for better GPU memory efficiency.
+Supports parallel environments on RTX 3090.
+
+For questions or collaboration, contact:
+    alexandre.schleiernevesdasilva@uni-hohenheim.de
 """
 
 from __future__ import annotations

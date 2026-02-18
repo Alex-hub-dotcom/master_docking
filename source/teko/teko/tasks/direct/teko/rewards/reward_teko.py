@@ -4,14 +4,6 @@ TEKO Reward Functions - Final Version with Progressive Tolerance
 ================================================================
 /home/schux00/teko/source/teko/teko/tasks/direct/teko/rewards/reward_teko.py
 
-Based on reward_functions.py (v9.1) with one key addition:
-- SUCCESS THRESHOLD is now PROGRESSIVE based on curriculum stage
-  - S0-S20:  3.0cm (learning basics)
-  - S21-S30: 2.0cm (refinement)
-  - S31-S41: 1.5cm (precision)
-  - S42-S49: 1.0cm (search + high precision)
-
-All other reward components remain EXACTLY the same.
 
 Reward structure:
 1. Distance reward     - Continuous penalty for being far
@@ -115,13 +107,7 @@ def _compute_yaw_error(robot_yaw: torch.Tensor, robot_pos: torch.Tensor,
 
 
 def _get_success_distance(env) -> float:
-    """
-    Get success distance threshold based on current curriculum stage.
     
-    This is the KEY CHANGE from original reward_functions.py:
-    - Uses progressive tolerance from curriculum_teko.py
-    - Falls back to default if curriculum_level not available
-    """
     if hasattr(env, 'curriculum_level'):
         stage = int(env.curriculum_level)
         return get_success_threshold(stage)

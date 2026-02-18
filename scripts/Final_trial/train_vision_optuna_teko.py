@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-TEKO Vision Optuna - FINAL VERSION (50 Stages + Progressive Tolerance)
+TEKO Vision Optuna - FINAL VERSION (50 Stages)
 =======================================================================
 /home/schux00/teko/scripts/Final_trial/train_vision_optuna_teko.py
 Unified training script combining:
 - 50-stage curriculum (S0-S41 precision + S42-S49 search)
-- Progressive tolerance (3cm → 2cm → 1.5cm → 1cm)
+- Fixed tolerance (3cm)
 - NSGA-II genetic algorithm sampler
 - SQLite storage for Optuna Dashboard
 
-Changes from v3:
-- max_stage: 41 → 49
-- Pruning schedule updated for 50 stages
-- Uses curriculum_teko.py and reward_teko.py
-- New database: teko_vision_final_v10.db
 
-Author: Alexandre Schleier Neves da Silva
+--------------------------------------------------------------------------------
+SUBMISSION NOTES
+--------------------------------------------------------------------------------
+- This script assumes the TEKO codebase is available at: /workspace/teko/source/teko
+- Outputs are written to:
+  - Optuna DB:     /home/schux00/optuna/teko_thesis_v5.db
+  - CSV logs:      /home/schux00/logs/
+  - TensorBoard:   /home/schux00/tensorboard/
+  - Checkpoints:   /home/schux00/checkpoints/
+- "Tolerance" / "success threshold" is defined by curriculum_teko.get_success_threshold(stage).
+  If that function returns a constant (e.g., 0.03), then tolerance is fixed; otherwise progressive.
+
+
+For questions or collaboration, contact:
+   alexandre.schleiernevesdasilva@uni-hohenheim.de
 """
 
 import os
@@ -37,6 +46,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Optuna is mandatory for this script.
 try:
     import optuna
 except ImportError:
@@ -56,15 +66,16 @@ print = partial(print, flush=True)
 # =============================================================================
 # CONFIGURATION - FINAL VERSION (50 Stages)
 # =============================================================================
+# Optuna/study-level configuration (trial limits, pruning schedule, DB location).
 OPTUNA_CONFIG = {
     # NEW database for fresh start
-    "study_name": "teko_vision_final_v12",
-    "storage_path": "sqlite:////home/schux00/optuna/teko_vision_final_v10.db",
+    "study_name": "teko_thesis_v5",
+    "storage_path": "sqlite:////home/schux00/optuna/teko_thesis_v5.db",
     "target_total_trials": 1000,
     "max_steps_per_trial": 300_000_000,  # Increased for 50 stages
     "max_walltime_s_per_trial": 120 * 3600,  # 120h per trial (more stages)
     
-    # Pruning config - UPDATED for 50 stages
+    # Pruning config - for 50 stages
     "pruning_enabled": True,
     "pruning_warmup_steps": 5_000_000,
     "pruning_check_interval": 500_000,
@@ -84,7 +95,7 @@ OPTUNA_CONFIG = {
 
 }
 
-# Fixed params
+# Fixed PPO + environment params (kept constant across trials).
 FIXED_PARAMS = {
     "gamma": 0.99,
     "value_coef": 0.5,
@@ -112,15 +123,17 @@ def should_prune(step, max_stage):
     return False
 
 
-# =============================================================================
-# NEURAL NETWORK (identical to previous - proven architecture)
-# =============================================================================
+# ==========================================
+# NEURAL NETWORK 
+# ==========================================
+# Attention blocks are lightweight and applied on the last conv feature map.
 class SpatialAttention(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, 1, kernel_size=1)
     
     def forward(self, x):
+        # Produces a spatial mask (H,W) and gates features.
         return x * torch.sigmoid(self.conv(x))
 
 
@@ -135,12 +148,23 @@ class ChannelAttention(nn.Module):
         )
     
     def forward(self, x):
+        # Global average pooling over spatial dims -> channel descriptor -> channel gating.
         b, c, h, w = x.shape
         y = x.view(b, c, -1).mean(-1)
         return x * self.fc(y).view(b, c, 1, 1)
 
 
 class VisionEncoderAttentionYaw(nn.Module):
+    """Vision encoder with channel+spatial attention and an auxiliary yaw prediction head.
+
+    Input:
+      - rgb tensor with 4 channels (e.g., grayscale/RGB + extra channel), 128x128
+    Output:
+      - feature vector (feature_dim)
+    Aux:
+      - predict_yaw(features) returns yaw estimate in radians (scaled by pi)
+    """
+
     def __init__(self, in_channels=4, feature_dim=256):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, 32, 8, stride=4, padding=2)
@@ -190,6 +214,17 @@ class VisionEncoderAttentionYaw(nn.Module):
 
 
 class VisionIMUAttentionYawPolicy(nn.Module):
+    """Actor-Critic with:
+    - Vision encoder (with attention)
+    - IMU MLP encoder
+    - Actor outputs mean actions, squashed via tanh (Gaussian policy)
+    - Critic uses asymmetric input by concatenating privileged (7D) if provided
+
+
+    - Privileged is used only for critic (asymmetric critic) and yaw supervision target.
+    - If privileged is missing, critic receives zeros to keep tensor shapes consistent.
+    """
+
     LOG_STD_MIN, LOG_STD_MAX = -2.0, 0.5
     
     def __init__(self, vis_dim=256, imu_dim=6, hidden=256, action_dim=2):
@@ -256,10 +291,22 @@ class VisionIMUAttentionYawPolicy(nn.Module):
         return log_prob, value, entropy, yaw_pred
 
 
-# =============================================================================
+# ==========================================
 # PPO FUNCTIONS (identical to previous)
-# =============================================================================
+# ==========================================
 def compute_gae(rewards, values, dones, gamma, lam, last_value):
+    """Generalized Advantage Estimation (GAE).
+
+    Inputs:
+      rewards: [T, N]
+      values:  [T, N]
+      dones:   [T, N] (float 0/1)
+      last_value: [N] value estimate for the last next-state
+    Outputs:
+      advantages: [T, N]
+      returns:    [T, N]
+    """
+
     T, N = rewards.shape
     advantages = torch.zeros_like(rewards)
     last_gae = torch.zeros(N, device=rewards.device)
@@ -273,6 +320,17 @@ def compute_gae(rewards, values, dones, gamma, lam, last_value):
 
 def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantages, returns, 
                          yaw_targets, privileged, cfg):
+
+    """PPO update with auxiliary yaw prediction loss.
+
+    - Actor loss: clipped surrogate
+    - Critic loss: MSE on returns
+    - Entropy bonus: encourages exploration
+    - Aux yaw loss: MSE between predicted yaw and yaw_targets
+
+    All tensors are flattened from [T,N,...] to [T*N,...] for minibatching.
+    """
+
     device = next(policy.parameters()).device
     T, N = rgb.shape[:2]
     total = T * N
@@ -319,11 +377,19 @@ def ppo_update_with_yaw(policy, optimizer, rgb, imu, actions, old_logp, advantag
     return {k: v / max(n_updates, 1) for k, v in metrics.items()}
 
 
-# =============================================================================
+# ==========================================
 # OPTUNA OBJECTIVE
-# =============================================================================
+# ==========================================
 def objective(trial, env, base_log_dir, get_success_threshold):
-    """Single objective: maximize max_stage + SSR."""
+    """Single objective: maximize max_stage + SSR.
+
+    Score returned to Optuna:
+      objective = max_stage_reached + ssr
+
+    Where:
+      - max_stage_reached: highest curriculum stage achieved in this trial
+      - ssr: stage success rate (moving window over recently finished episodes)
+    """
 
     
     # ==========================================================================
@@ -626,9 +692,9 @@ def objective(trial, env, base_log_dir, get_success_threshold):
     return float(max_stage_reached) + ssr
 
 
-# =============================================================================
+# ==========================================
 # WORKER
-# =============================================================================
+# ==========================================
 def run_worker(args):
     torch.backends.cudnn.benchmark = True
     seed = args.seed + int(time.time()) % 1000
@@ -717,17 +783,15 @@ def run_worker(args):
     print(f"Dashboard: optuna-dashboard {storage}")
     print(f"TensorBoard: {base_log_dir}")
     print(f"Max Stages: {MAX_STAGE + 1} (S0-S{MAX_STAGE})")
-    print(f"Tolerance: 3cm (S0-20) -> 2cm (S21-30) -> 1.5cm (S31-41) -> 1cm (S42-49)")
+    print(f"Tolerance: Fixed 2cm (all stages)")
     print(f"Trials so far: {len(study.trials)}")
     print("=" * 70)
     
     try:
-        # Force 3cm fixed threshold (like Trial 80)
-        get_success_threshold_fixed = lambda stage: 0.03
 
         while len(study.trials) < OPTUNA_CONFIG["target_total_trials"]:
             study.optimize(
-                lambda tr: objective(tr, env, base_log_dir, get_success_threshold_fixed), 
+                lambda tr: objective(tr, env, base_log_dir, _get_success_threshold), 
                 n_trials=1
             )
     finally:

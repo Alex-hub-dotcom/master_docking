@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 TEKO Static Agent — Using teko_goal.usd
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/robots/teko_static.py
 ---------------------------------------
  Uses pre-made static USD (no camera, no actuators)
  Keeps collisions and gravity (falls naturally)

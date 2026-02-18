@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""TEKO Vision+IMU Environment with Privileged Observations"""
+"""TEKO Vision+IMU Environment with Privileged Observations
+/home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env_tiled_imu.py
 
+Author: Alexandre Schleier Neves da Silva
+
+For questions or collaboration, contact:
+    alexandre.schleiernevesdasilva@uni-hohenheim.de
+"""
+#/home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env_tiled_imu.py
 from .teko_env_tiled import TekoEnvTiled
 import torch
 
@@ -56,7 +63,7 @@ class TekoEnvTiledIMU(TekoEnvTiled):
             dx / pos_scale,
             dy / pos_scale,
             dz / pos_scale,
-            yaw_err / ang_scale,  # INDEX 3 = yaw_error for aux head!
+            yaw_err ,  # INDEX 3 = yaw_error for aux head!
             vx / vel_scale,
             vy / vel_scale,
             omega / ang_scale,

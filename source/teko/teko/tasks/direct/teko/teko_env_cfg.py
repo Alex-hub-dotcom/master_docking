@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-TEKO Environment Configuration (TiledCamera + Frame Stacking) NOVO
+TEKO Environment Configuration (TiledCamera + Frame Stacking)
 --------------------------------------------------------------
 /home/schux00/teko/source/teko/teko/tasks/direct/teko/teko_env_cfg.py
+
 Optimized for:
 - TiledCamera for efficient parallel rendering
-- 84×84 grayscale observations with 4-frame stacking
 - Asymmetric actor-critic (vision + privileged state)
-- 200-500+ parallel environments on RTX 3090
 
 Compatible with Isaac Lab 0.47.1 / Isaac Sim 5.0.
+
+Author: Alexandre Schleier Neves da Silva
+
+For questions or collaboration, contact:
+    alexandre.schleiernevesdasilva@uni-hohenheim.de
 """
 
 from __future__ import annotations
